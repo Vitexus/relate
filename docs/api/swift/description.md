@@ -25,6 +25,12 @@ binds as a `FLOAT32` vector, a point is built from a latitude and longitude
 or a `CLLocationCoordinate2D`, and a Core ML output array becomes a vector
 directly. An app stores what it has without formatting it into text first.
 
+Results read the same way. A `QueryResult` is a collection of records, and a
+record's typed accessor (`try record.get("title", as: String.self)`) converts
+strictly, naming the column, the type asked for and the kind found when they
+disagree. Parameters take Swift values as they are: strings, numbers,
+optionals, arrays, dates and an app's own raw-value enums.
+
 The concurrency model is the C ABI's, checked by the Swift 6 compiler: a
 `Database` may be shared across tasks and actors, a `Connection` may not. The
 idiomatic shape is one actor that owns a connection and exposes app-level

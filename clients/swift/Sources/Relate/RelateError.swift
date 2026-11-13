@@ -81,6 +81,33 @@ extension EngineError {
     public var isWriteConflict: Bool { code == StatusCode.transactionOutdated }
 }
 
+/// What ``RelateError/unexpectedResult(_:)`` carries: a result that did not
+/// have the shape or type the caller asked for.
+public struct ResultMismatch: Sendable, Hashable {
+    /// Where: the column name, then any map keys and list positions
+    /// (`"[2]"`) below it. Empty for a whole-result shape (`single()`).
+    public let path: [String]
+    /// What was asked for: a Swift type name, or a shape (`exactly one record`).
+    public let expected: String
+    /// What was there: a value kind (`null`, `string`), or a shape.
+    public let found: String
+    /// Why an in-kind value still did not convert (`300 is out of range`).
+    public let reason: String?
+
+    init(path: [String], expected: String, found: String, reason: String? = nil) {
+        self.path = path
+        self.expected = expected
+        self.found = found
+        self.reason = reason
+    }
+
+    public var message: String {
+        let place = path.isEmpty ? "" : path.joined(separator: ".") + ": "
+        let why = reason.map { " (\($0))" } ?? ""
+        return "\(place)expected \(expected), found \(found)\(why)"
+    }
+}
+
 /// Every error the Swift surface throws.
 public enum RelateError: LocalizedError, Sendable, Equatable, CustomStringConvertible {
     /// The engine (or the C boundary) refused the call; the typed shape
@@ -90,12 +117,27 @@ public enum RelateError: LocalizedError, Sendable, Equatable, CustomStringConver
     case invalidParameter(String)
     /// The C ABI returned a payload that violates its documented contract.
     case decoding(String)
+    /// A result did not have the shape or type the caller asked for: a
+    /// typed record accessor, `single()`, or a `Decodable` decode.
+    case unexpectedResult(ResultMismatch)
 
     public var message: String {
         switch self {
         case .engine(let e): e.message
         case .invalidParameter(let m), .decoding(let m): m
+        case .unexpectedResult(let mismatch): mismatch.message
         }
+    }
+
+    /// This error with `component` prefixed to its mismatch path: how a
+    /// container or record names where inside it a conversion failed. Any
+    /// other error is returned unchanged.
+    func nested(under component: String) -> RelateError {
+        guard case .unexpectedResult(let mismatch) = self else { return self }
+        return .unexpectedResult(
+            ResultMismatch(
+                path: [component] + mismatch.path, expected: mismatch.expected,
+                found: mismatch.found, reason: mismatch.reason))
     }
 
     /// The typed shape when this is an `.engine` error, `nil` otherwise.
@@ -112,6 +154,7 @@ public enum RelateError: LocalizedError, Sendable, Equatable, CustomStringConver
         case .engine(let e): "Relate: [\(e.code)] \(e.message)"
         case .invalidParameter(let m): "Relate invalid parameter: \(m)"
         case .decoding(let m): "Relate decoding error: \(m)"
+        case .unexpectedResult(let mismatch): "Relate unexpected result: \(mismatch.message)"
         }
     }
 

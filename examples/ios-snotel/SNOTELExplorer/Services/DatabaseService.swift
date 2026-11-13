@@ -201,7 +201,7 @@ actor DatabaseService {
                    avg(r.swe_inches) AS avgSWE, count(DISTINCT s) AS stationCount
             ORDER BY b.name
             """
-        ).records.map(Basin.from)
+        ).records.map { try Basin.from(row: $0.dictionary) }
     }
 
     func searchStations(_ searchText: String) throws -> [Station] {
@@ -291,14 +291,11 @@ actor DatabaseService {
             ORDER BY \(orderBy)
             """,
             params: params
-        ).records.map(Station.from)
+        ).records.map { try Station.from(row: $0.dictionary) }
     }
 
     private func count(_ query: String) throws -> Int {
-        guard let count = try execute(query).scalar().intValue else {
-            throw RelateError.decoding("count() did not return an integer")
-        }
-        return Int(count)
+        try execute(query).scalar(as: Int.self)
     }
 
     @discardableResult

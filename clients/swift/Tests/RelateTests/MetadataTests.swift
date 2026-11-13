@@ -159,11 +159,14 @@ import Testing
         #expect(try conn.query("RETURN 1").namespace == .neo4j)
         #expect(try conn.query("USE system SHOW DATABASES YIELD name RETURN name").namespace == .system)
         #expect(try conn.query("RETURN 1").namespace == .neo4j)
-        try conn.setNamespace("system")
+        try conn.setNamespace(.system)
         #expect(try conn.query("SHOW DATABASES").namespace == .system)
-        let sys = try conn.database.connect(namespace: "system")
+        let sys = try conn.database.connect(namespace: .system)
         #expect(try sys.query("SHOW DATABASES").namespace == .system)
-        #expect(throws: RelateError.self) { try conn.database.connect(namespace: "nope") }
+        // The engine owns the vocabulary: a name outside it is refused at
+        // the crossing both typed entry points share.
+        #expect(throws: RelateError.self) { try conn.database.connect(namespaceNamed: "nope") }
+        #expect(throws: RelateError.self) { try conn.setNamespace(named: "nope") }
         // The typed forms name the same namespaces.
         let typed = try conn.database.connect(namespace: .system)
         #expect(try typed.query("SHOW DEFAULT DATABASE").namespace == .system)

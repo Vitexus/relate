@@ -29,7 +29,7 @@ public final class Database: @unchecked Sendable {
     public let isReadOnly: Bool
     public func connect() throws(RelateError) -> Connection                              // namespace "neo4j"
     public func connect(namespace: DatabaseNamespace) throws(RelateError) -> Connection  // .neo4j | .system | .systemOntologies (ADR-0117)
-    public func connect(namespace: String?) throws(RelateError) -> Connection            // the same three, by name
+    @available(*, deprecated) public func connect(namespace: String?) throws(RelateError) -> Connection  // by name; use the typed form
     public func checkpoint() throws(RelateError)
 }
 
@@ -37,7 +37,7 @@ public final class Connection {                  // NOT Sendable
     public let database: Database
     public func query(_ cypher: String, _ parameters: [String: CypherValue] = [:]) throws(RelateError) -> QueryResult
     public func setNamespace(_ namespace: DatabaseNamespace) throws(RelateError)  // only between transactions
-    public func setNamespace(_ name: String) throws(RelateError)
+    @available(*, deprecated) public func setNamespace(_ name: String) throws(RelateError)  // by name; use the typed form
     public func begin() throws(RelateError)
     @discardableResult public func commit() throws(RelateError) -> String?  // the transaction's bookmark; nil when it committed nothing
     public func rollback() throws(RelateError)
@@ -60,9 +60,11 @@ public struct QueryResult: Sendable {
     public let planMs: Double                    // ADR-0491: binding + planning window
     public let executeMs: Double                 // ADR-0491: dispatch (or EXPLAIN render) window
                                                  // parseMs + planMs + executeMs <= elapsedMs
-    public var records: [[String: CypherValue]] { get }
-    public func scalar() throws(RelateError) -> CypherValue   // exactly one row and one column
+    public var records: [Record] { get }                      // the records iterating the result yields
+    public func scalar() throws(RelateError) -> CypherValue   // exactly one row and one column, else .unexpectedResult
 }
+// QueryResult is Equatable (every field, timings included) and a
+// RandomAccessCollection of Record — see "Records" below.
 
 public enum CypherValue: Sendable, Hashable, CustomStringConvertible {
     case null, bool(Bool), int(Int64), float(Double), string(String)
@@ -82,6 +84,15 @@ public enum RelateError: LocalizedError, Sendable, Equatable {
     case engine(EngineError)       // the typed error shape (below)
     case invalidParameter(String)  // refused before reaching the engine
     case decoding(String)          // the C ABI broke its documented contract
+    case unexpectedResult(ResultMismatch) // a result was not the shape or type asked for (Records, below)
+}
+
+public struct ResultMismatch: Sendable, Hashable {
+    public let path: [String]      // the column, then map keys and list positions ("[2]") below it; [] for a whole-result shape
+    public let expected: String    // a Swift type name, or a shape ("exactly one record")
+    public let found: String       // a value kind ("null", "string"), or a shape ("2 records")
+    public let reason: String?     // why an in-kind value did not convert ("300 is out of range")
+    public var message: String     // "rating: expected Double, found null"
 }
 
 public struct EngineError: Sendable, Hashable {
@@ -181,6 +192,60 @@ Strings and map keys carry a byte length, so interior NULs cross whole
 (`.map(["a": .null])`) is distinct from an absent key. UUIDs cross as
 `STRING`, byte arrays as `LIST` of `INT`.
 
+## Records
+
+```swift
+public struct Record: Sendable, Hashable, RandomAccessCollection {   // of CypherValue, by column position
+    public let values: [CypherValue]
+    public var columns: [String] { get }
+    public subscript(position: Int) -> CypherValue { get }
+    public subscript(column: String) -> CypherValue? { get }      // nil: no such column (a null cell is .null)
+    public var dictionary: [String: CypherValue] { get }
+    public func get<T: CypherValueConvertible>(_ column: String, as: T.Type = T.self) throws(RelateError) -> T
+    public func get<T: CypherValueConvertible>(_ position: Int, as: T.Type = T.self) throws(RelateError) -> T
+}
+
+extension QueryResult: RandomAccessCollection {                   // of Record: for-in, first, count, map, result[i]
+    public func single() throws(RelateError) -> Record            // exactly one record
+    public func scalar<T: CypherValueConvertible>(as: T.Type) throws(RelateError) -> T
+}
+
+public protocol CypherValueConvertible {
+    func cypherValue() throws(RelateError) -> CypherValue
+    init(cypherValue: CypherValue) throws(RelateError)
+}
+```
+
+A `Record` is a view of one row, with the name lookup built once per result
+(a duplicated column name resolves to its last column). `rows` is unchanged.
+`records` returns the same `Record`s that iterating the result yields; it
+returned `[[String: CypherValue]]` before, and `record.dictionary` is that
+form. Code that reads `record["name"]?.stringValue` compiles unchanged.
+
+Typed reads are strict. The conversions are:
+
+| Swift type | Reads from | Binds as |
+| --- | --- | --- |
+| `Bool`, `String`, `Substring` | `.bool`, `.string` | the same |
+| `Int`, `Int8`…`Int64`, `UInt`, `UInt8`…`UInt64` | `.int`, refusing a value the type cannot hold | `.int`; a value above `Int64.max` is `.invalidParameter` |
+| `Double`, `Float` | `.float`, or `.int` widened (`Float` narrows a `.float`) | `.float` |
+| `Optional<T>` | `.null` as `nil`, else `T` | `nil` as `.null` |
+| `[T]` | `.list`, or a `.vector` as the list of its coordinates | `.list` (never a vector: use `CypherValue(vector:)`) |
+| `[String: T]` | `.map` (not a node or relationship) | `.map` |
+| `Foundation.Date` | `.dateTime` (a `.localDateTime` has no instant) | a UTC `.dateTime` |
+| `URL`, `UUID` | `.string` that parses as one | `.string` (a `UUID` lowercase, as `randomUUID()` spells one) |
+| `Data` | a `.list` of integers `0...255` | the same |
+| `CLLocationCoordinate2D` | a geographic `.point` | a 2D WGS 84 `.point` (an invalid coordinate is refused) |
+| `CypherValue` and its payload structs (`Point`, `Date`, `DateTime`, `Vector`, `Node`, …) | their own case | their own case |
+| a `RawRepresentable` type that declares the conformance | its raw value, refusing one outside the type | its raw value |
+
+Nothing else converts: a string is never parsed into a number, a float never
+truncates to an integer, a `null` is never a default. A failure throws
+`.unexpectedResult` with the column first in `path`, then the map key or
+list position inside it (`["mixed", "[1]"]`). `single()` throws it for zero
+or several rows; `scalar()` and `scalar(as:)` throw it for anything but one
+row and one column.
+
 ## Bridges
 
 Conversions between `CypherValue`'s typed structs and the platform's own
@@ -271,7 +336,12 @@ CypherValue.init(_: CLLocationCoordinate2D) throws(RelateError)
 
 ## Parameters
 
-`query(_:_:)` binds `parameters` through the C ABI's typed params builder
+`query(_:_:)` takes `[String: CypherValue]` or
+`[String: any CypherValueConvertible]`. The second converts each Swift value
+first (the table under "Records"), so variables bind without wrapping:
+`["title": title, "year": year, "rating": rating as Double?]`. A dictionary
+of literals, `nil` or enum cases resolves to the first, as before. Either
+way the call binds `parameters` through the C ABI's typed params builder
 (ADR-0502 §4) — one putter per value, no JSON, so temporals, points,
 vectors, durations, non-finite floats and full-range integers all bind
 directly (`["d": .date(...)]`, `["v": .vector(.ints(dtype: .integer8,

@@ -4,7 +4,7 @@ let db = try Database.inMemory()
 
 // connect() is connect(namespace: .neo4j); the other fixed namespaces are
 // .system and .systemOntologies (ADR-0117) — the latter visible only under
-// the `ontology` preview opt-in (ADR-0593). Each also has a by-name form.
+// the `ontology` preview opt-in (ADR-0593).
 let conn = try db.connect()
 try conn.query("CREATE (:Item)")
 
@@ -23,10 +23,3 @@ precondition(shown.namespace == .system)
 let system = try db.connect(namespace: .system)
 let defaultDatabase = try system.query("SHOW DEFAULT DATABASE")
 precondition(defaultDatabase.namespace == .system)
-
-do {
-    _ = try db.connect(namespace: "nope")
-    preconditionFailure("an unknown namespace must be refused")
-} catch {
-    print("refused:", error.message)
-}

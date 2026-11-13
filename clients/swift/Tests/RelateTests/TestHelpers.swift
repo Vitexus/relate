@@ -48,3 +48,13 @@ func invalidParameterMessage(_ body: () throws -> Void) throws -> String {
     }
     return message
 }
+
+/// The mismatch `body` must throw: any other outcome fails the test.
+func resultMismatch(_ body: () throws -> Void) throws -> ResultMismatch {
+    let error = try #require(throws: RelateError.self) { try body() }
+    guard case .unexpectedResult(let mismatch) = error else {
+        Issue.record("expected unexpectedResult, got \(error)")
+        throw error
+    }
+    return mismatch
+}

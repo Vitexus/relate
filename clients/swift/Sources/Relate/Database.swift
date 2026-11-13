@@ -76,25 +76,33 @@ public final class Database: @unchecked Sendable {
         _ = relate_database_close(handle)
     }
 
-    /// A new connection on the default namespace `neo4j`.
+    /// A new connection on the default namespace, `neo4j`.
     public func connect() throws(RelateError) -> Connection {
-        try connect(namespace: nil)
+        try connect(namespace: .neo4j)
     }
 
-    /// A new connection whose session namespace is `namespace` (ADR-0117),
-    /// typed: one of the three fixed namespaces.
+    /// A new connection whose session namespace is `namespace` (ADR-0117):
+    /// one of the three fixed namespaces.
     public func connect(namespace: DatabaseNamespace) throws(RelateError) -> Connection {
-        try connect(namespace: namespace.rawValue)
+        try connect(namespaceNamed: namespace.rawValue)
     }
 
-    /// A new connection whose session namespace is `namespace` (ADR-0117).
+    /// A new connection whose session namespace is named `namespace`
+    /// (`nil` is `neo4j`).
+    @available(*, deprecated, message: "the namespaces are fixed: pass a DatabaseNamespace to connect(namespace:)")
     public func connect(namespace: String?) throws(RelateError) -> Connection {
+        try connect(namespaceNamed: namespace ?? DatabaseNamespace.neo4j.rawValue)
+    }
+
+    /// The one crossing that opens a session. The engine matches `name`
+    /// against its fixed namespaces and refuses any other.
+    func connect(namespaceNamed name: String) throws(RelateError) -> Connection {
         var out: OpaquePointer?
         var err: UnsafeMutablePointer<CChar>? = nil
-        let status = try withOptionalCString(namespace, what: "namespace") {
+        let status = try withCString(name, what: "namespace") {
             relate_connect_namespace(handle, $0, &out, &err)
         }
-        try check(status, err, "connecting to namespace '\(namespace ?? "neo4j")'")
+        try check(status, err, "connecting to namespace '\(name)'")
         return Connection(handle: try requireHandle(out, "relate_connect_namespace"), database: self)
     }
 
@@ -123,19 +131,27 @@ public final class Connection {
         _ = relate_disconnect(handle)
     }
 
-    /// Changes the session namespace; only allowed between transactions.
+    /// Changes the session namespace to one of the three fixed namespaces;
+    /// only allowed between transactions.
+    public func setNamespace(_ namespace: DatabaseNamespace) throws(RelateError) {
+        try setNamespace(named: namespace.rawValue)
+    }
+
+    /// Changes the session namespace, by name; only allowed between
+    /// transactions.
+    @available(*, deprecated, message: "the namespaces are fixed: pass a DatabaseNamespace to setNamespace(_:)")
     public func setNamespace(_ name: String) throws(RelateError) {
+        try setNamespace(named: name)
+    }
+
+    /// The one crossing that changes the session namespace; the engine
+    /// refuses a name outside its fixed namespaces.
+    func setNamespace(named name: String) throws(RelateError) {
         var err: UnsafeMutablePointer<CChar>? = nil
         let status = try withCString(name, what: "namespace") {
             relate_conn_set_namespace(handle, $0, &err)
         }
         try check(status, err, "setting the namespace to '\(name)'")
-    }
-
-    /// Changes the session namespace to one of the three fixed namespaces;
-    /// only allowed between transactions.
-    public func setNamespace(_ namespace: DatabaseNamespace) throws(RelateError) {
-        try setNamespace(namespace.rawValue)
     }
 
     /// Runs one statement. An empty `parameters` binds none; otherwise each
@@ -164,6 +180,17 @@ public final class Connection {
             throw engineError(from: relate_result_error_json(result), what: "the error result")
         }
         return try QueryResult.materialize(result)
+    }
+
+    /// Runs one statement with Swift values as parameters: each converts
+    /// through ``CypherValueConvertible`` — strings, numbers, optionals
+    /// (`nil` is `null`), arrays, string-keyed dictionaries, `Date`, `URL`,
+    /// `UUID` and the typed structs.
+    @discardableResult
+    public func query(_ cypher: String, _ parameters: [String: any CypherValueConvertible])
+        throws(RelateError) -> QueryResult
+    {
+        try query(cypher, try convertParameters(parameters))
     }
 
     public func begin() throws(RelateError) {

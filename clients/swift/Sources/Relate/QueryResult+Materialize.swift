@@ -40,7 +40,7 @@ extension QueryResult {
             bookmark = try required(text, "the result's bookmark")
         }
         return QueryResult(
-            columns: columns,
+            columnIndex: ColumnIndex(columns),
             rows: rows,
             bookmark: bookmark,
             queryType: queryType,

@@ -10,6 +10,31 @@ public enum CypherValueKind: UInt32, Sendable, Hashable, CaseIterable {
     /// return: a negative raw (a NULL handle) never reaches here, and an
     /// enumerator this client does not know (a later, additive ABI) is a
     /// defined, reportable error — never a silent null.
+    /// The kind as error text names it (``ResultMismatch/found``). Spelled
+    /// out, not reflected, because callers match on it.
+    var name: String {
+        switch self {
+        case .null: "null"
+        case .bool: "bool"
+        case .int: "int"
+        case .float: "float"
+        case .string: "string"
+        case .node: "node"
+        case .relationship: "relationship"
+        case .path: "path"
+        case .list: "list"
+        case .map: "map"
+        case .point: "point"
+        case .date: "date"
+        case .time: "time"
+        case .localTime: "localTime"
+        case .dateTime: "dateTime"
+        case .localDateTime: "localDateTime"
+        case .duration: "duration"
+        case .vector: "vector"
+        }
+    }
+
     init(abi raw: Int32) throws(RelateError) {
         guard raw >= 0, let kind = CypherValueKind(rawValue: UInt32(raw)) else {
             throw RelateError.decoding("unsupported value kind \(raw) from the C ABI")

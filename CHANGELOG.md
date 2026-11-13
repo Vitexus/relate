@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   18 hours, date components that are not a calendar day, a duration beyond
   `Int64` seconds, a latitude or longitude off the globe, and a vector with
   a non-finite coordinate or more than 4,096 coordinates.
+- Swift: `CypherValueConvertible`, so parameter dictionaries take Swift
+  values (strings, numbers, optionals, arrays, dates, raw-value enums)
+  without wrapping. A `QueryResult` is a collection of `Record`s with strict
+  typed accessors (`record.get("title", as: String.self)`), plus `single()`
+  and `scalar(as:)`. `QueryResult` is `Equatable`.
 
 ### Changed
 
@@ -63,6 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NotificationSeverity` and `NotificationCategory`, with deprecated aliases.
 - Swift: calls that can only fail with the package's own error are
   `throws(RelateError)`.
+- Swift: `QueryResult.records` returns `[Record]` instead of
+  `[[String: CypherValue]]`. Reading a record by column name
+  (`record["name"]`) is unchanged; `record.dictionary` is the old form.
+- Swift: `RelateError` has a new case, `unexpectedResult`; an exhaustive
+  `switch` over it needs the case. `QueryResult.scalar()` now throws it,
+  rather than `decoding`, for a result that is not one row and one column.
+
+### Deprecated
+
+- Swift: `connect(namespace:)` and `setNamespace(_:)` taking a namespace
+  name as a `String`. The namespaces are fixed; pass a
+  `DatabaseNamespace`.
 
 ## [1.0.1] — 2026-11-12
 
