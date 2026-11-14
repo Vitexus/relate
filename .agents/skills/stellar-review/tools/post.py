@@ -160,11 +160,18 @@ FINDING_AREAS = frozenset(briefs_mod.PASS_LAYOUT)
 def sanitize(text: str) -> str:
     """Model-written text lands in the summary comment; HTML comment
     markers would let it forge a stellar-ledger block or break the
-    verdict marker parsing downstream. Loops to a fixpoint: a single
-    pass can reassemble a marker across the seam (`<!---->`)."""
+    verdict marker parsing downstream, and a line break would let it
+    open its own line — a lane marker at line start is the summary
+    discovery key (find_summary_comment) and the enforce gate's tier-3
+    parse, so model text must never be able to start one. Every line
+    boundary str.splitlines sees — newline, carriage return, and the
+    Unicode separators, the same boundary set discovery splits on — is
+    flattened to a space, so a marker survives only mid-line, where
+    neither discovery nor the gate matches it. Loops to a fixpoint: a
+    single pass can reassemble a marker across the seam (`<!---->`)."""
     while "<!--" in text or "-->" in text:
         text = text.replace("<!--", "").replace("-->", "")
-    return text
+    return " ".join(text.splitlines())
 
 
 class FindingsError(SystemExit):

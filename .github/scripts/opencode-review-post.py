@@ -83,15 +83,30 @@ RUST_SUFFIXES = (".rs",)
 RUST_FILENAMES = ("Cargo.toml", "Cargo.lock")
 
 
+def _gate_paths(facts: dict) -> list[str]:
+    """Every path a changed file occupied in the diff: its HEAD path
+    plus, for a rename or copy, the old path facts.py records — its one
+    spelling of the rename old name. The relevance predicates judge a
+    file on both endpoints: a rename into a docs-classified path is a
+    change to the file that was there, not a docs-only diff, so the
+    no-op gate can never be dodged by the new name alone."""
+    paths = []
+    for f in facts["files"]:
+        paths.append(f["path"])
+        if f.get("old_path"):
+            paths.append(f["old_path"])
+    return paths
+
+
 def _rust_relevant(facts: dict) -> bool:
     return any(
         path.endswith(RUST_SUFFIXES) or os.path.basename(path) in RUST_FILENAMES
-        for path in (f["path"] for f in facts["files"])
+        for path in _gate_paths(facts)
     )
 
 
 def _security_relevant(facts: dict) -> bool:
-    paths = [f["path"] for f in facts["files"]]
+    paths = _gate_paths(facts)
     if any(path.startswith(ALWAYS_RELEVANT_PREFIXES) for path in paths):
         return True
     # facts.py's docs classification (its one spelling) decides "code

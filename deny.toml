@@ -10,7 +10,9 @@
 # re-triage prompt, not a standing accept: delete it and either upgrade
 # the dependency or write a fresh reason with a new expiry. cargo-deny
 # 0.20.x ignore entries accept only `id` and `reason` — any other key
-# fails config parsing — so the expiry rides as a comment on the entry.
+# fails config parsing — so the expiry rides as a `# expiry: YYYY-MM-DD`
+# comment on the entry's `id` line, where scripts/check_deny_expiry.py
+# (the weekly workflow's gate) is the only enforcement.
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time proc-macro reached only through parquet; upstream is unmaintained and no fixed release exists, so this entry is re-triaged at expiry or dropped when parquet moves off paste" }, # expiry: 2027-05-14
     { id = "RUSTSEC-2025-0020", reason = "relate-python pins pyo3 0.23; the affected API (PyString::from_object) is never called by the bindings, and the fix needs a breaking pyo3 0.24+ upgrade of relate-python" }, # expiry: 2027-05-14
