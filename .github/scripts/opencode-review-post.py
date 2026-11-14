@@ -65,11 +65,16 @@ REQUIRED_FIELDS = ("path", "line", "severity", "category", "title", "why", "fix"
 
 # The security lane's always-relevant paths: these control what code and
 # instructions run in CI with secrets — the workflows and the actions
-# they compose, the scripts and prompts they run, the skills that steer
-# agents, the dependency-update policy, and who owns review approval —
-# so they always warrant the full review. The old prompt spelled this
-# rule for the model; the script is now the one spelling, and the model
-# only runs when it holds.
+# they compose, the scripts and prompts they run, the skills and agent
+# definitions that steer model runs, the release-notes agent's
+# permission config, the dependency-update policy, and who owns review
+# approval — so they always warrant the full review. Every one of them
+# is docs-classified by facts.py's DOCS_PATH (all .github/ paths; all
+# .md files), so the prefix match decides relevance before — and
+# independently of — any code-change requirement: round-5's bypass was
+# exactly a docs-classified agent config no-opping the lane as docs.
+# The old prompt spelled this rule for the model; the script is now the
+# one spelling, and the model only runs when it holds.
 ALWAYS_RELEVANT_PREFIXES = (
     ".github/workflows/",
     ".github/actions/",
@@ -77,7 +82,10 @@ ALWAYS_RELEVANT_PREFIXES = (
     ".github/prompts/",
     ".github/dependabot.yml",
     ".github/CODEOWNERS",
+    ".github/opencode-release-notes.json",
     ".agents/skills/",
+    ".opencode/agents/",
+    ".claude/agents/",
 )
 RUST_SUFFIXES = (".rs",)
 RUST_FILENAMES = ("Cargo.toml", "Cargo.lock")

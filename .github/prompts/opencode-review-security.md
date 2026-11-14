@@ -15,7 +15,7 @@ Your FIRST action is to invoke the `security-review` skill via the `skill` tool 
 - The skill owns the review shape: its checklist (scope, threat model, input validation, authorization, secrets handling, dependency changes) defines the analysis steps. Do not re-derive or hand-roll the scope here.
 - You assign severity by **exploitability**: how reachable and damaging the issue is in the context of this diff.
 
-(The workflow already decided this diff warrants a security review — the script that gates this lane treats changes under the CI-control paths `.github/workflows/`, `.github/scripts/`, `.github/prompts/`, and `.agents/skills/` as always security-relevant, and any code change as relevant. There is no no-op step here; if you find nothing worth flagging, record an empty findings list per the shared protocol.)
+(The workflow already decided this diff warrants a security review — the script that gates this lane, `.github/scripts/opencode-review-post.py`, spells the always-relevant CI-control paths in its `ALWAYS_RELEVANT_PREFIXES` and treats any code change as relevant. There is no no-op step here; if you find nothing worth flagging, record an empty findings list per the shared protocol.)
 
 ## Protocol parameters
 
