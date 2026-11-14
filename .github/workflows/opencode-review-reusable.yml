@@ -278,9 +278,25 @@ jobs:
           # is read straight into the invocation's argv here.
           MARKER="$RUNNER_TEMP/review_timed_out"
           set +e
+          # --auto — auto-approve permission requests that no deny rule
+          # blocks (the flag's own contract). The runner sandbox is the
+          # permission boundary: the step carries no GitHub token
+          # (GH_TOKEN is the invalid literal "none"), its env-publish
+          # channels are blanked, and the post steps trust nothing the
+          # model left behind — so an approved shell call grants nothing
+          # the model could not already do, and every trust decision
+          # stays scripted in the posts. Without it, a non-interactive
+          # run auto-rejects whatever the permission classifier does not
+          # pre-allow: in run 43635101612 the security model's
+          # sandbox-experiment cleanup (`cd /; rm -rf "$T"`) was
+          # declined twice ("The user declined this tool call"),
+          # aborting the run before a findings document landed — the
+          # lane failed closed with no review at all. Fail-closed is
+          # unchanged: a genuinely failing run still writes no findings
+          # and still fails the lane.
           timeout --signal=INT --kill-after=60s \
             "$((REVIEW_TIMEOUT_MINUTES - 3))m" \
-            opencode run --model "$OPENCODE_REVIEW_MODEL" "$(cat "$PROMPT_FILE")"
+            opencode run --model "$OPENCODE_REVIEW_MODEL" --auto "$(cat "$PROMPT_FILE")"
           code=$?
           set -e
           if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
