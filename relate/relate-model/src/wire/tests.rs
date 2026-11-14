@@ -418,19 +418,10 @@ fn plan_warning_covers_the_typed_vocabulary() {
         PlanWarning::CartesianProduct.message(),
         "the MATCH patterns share no join anchor"
     );
+    assert_eq!(PlanWarning::AllNodesScan.name(), WARNING_ALL_NODES_SCAN);
     assert_eq!(
-        PlanWarning::AllNodesScan {
-            index: ":Person(name)".to_string()
-        }
-        .name(),
-        WARNING_ALL_NODES_SCAN
-    );
-    assert_eq!(
-        PlanWarning::AllNodesScan {
-            index: ":Person(name)".to_string()
-        }
-        .message(),
-        "the scan matches every node; consider the property index (:Person(name))"
+        PlanWarning::AllNodesScan.message(),
+        "the scan matches every node; add a label to narrow it"
     );
     // The parse: the vocabulary's names with the payload shape their
     // variant carries, and `None` on anything outside — a wire-contract
@@ -444,20 +435,18 @@ fn plan_warning_covers_the_typed_vocabulary() {
         Some(PlanWarning::CartesianProduct)
     );
     assert_eq!(
+        PlanWarning::from_wire_parts("AllNodesScan", None),
+        Some(PlanWarning::AllNodesScan)
+    );
+    assert_eq!(
         PlanWarning::from_wire_parts("AllNodesScan", Some(":Person(name)")),
-        Some(PlanWarning::AllNodesScan {
-            index: ":Person(name)".to_string()
-        })
+        None,
+        "the label-less scan warning carries no index"
     );
     assert_eq!(
         PlanWarning::from_wire_parts("NotAWarning", None),
         None,
         "outside the vocabulary"
-    );
-    assert_eq!(
-        PlanWarning::from_wire_parts("AllNodesScan", None),
-        None,
-        "the scan warning without its index payload"
     );
     assert_eq!(
         PlanWarning::from_wire_parts("CartesianProduct", Some(":Person(name)")),

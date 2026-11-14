@@ -1547,7 +1547,7 @@ noted):
 | Warning | Fires on | Message |
 | --- | --- | --- |
 | `CartesianProduct` | a multi-pattern `MATCH` whose patterns share no join anchor (no node variable appears in more than one pattern) | `the MATCH patterns share no join anchor` |
-| `AllNodesScan` | a label-less scan (`MATCH (n)`) while the store carries a property index — the message names the existing index as the suggestion | `the scan matches every node; consider the property index (:Label(property))` |
+| `AllNodesScan` | a label-less scan (`MATCH (n)`) while the store carries a property index — the message advises a label and names no index, since no index serves an unlabeled pattern | `the scan matches every node; add a label to narrow it` |
 | `LabelDisjunctionScan` | a folded label disjunction no seek serves (LABS-1083) — the scan answers per disjunct label, never every node; the message names the predicate's own per-label `:Label(property)` pairs as the suggestion, never an unrelated store index | `the disjunction scan answers per label; consider the property index (:Model(id), :Source(id))` |
 | `EstimationMiss` | `PROFILE` only: an operator whose estimate overshoots its actual rows by 10x or more — the same policy that flags the `Est/Actual` cell with `!` | `estimated rows 10x or more above the actual rows` |
 

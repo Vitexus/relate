@@ -129,13 +129,13 @@ pub const REASONS: [&str; 4] = ["bound-pivot", "cheapest", "seek-anchored", "ind
 /// of warning maps from the [`PlanWarning`](crate::wire::PlanWarning)
 /// vocabulary, present only when the node carries one. Each map
 /// carries the warning's name and, when the warning has a payload
-/// (the `AllNodesScan` warning's suggested index), that payload —
+/// (the `LabelDisjunctionScan` warning's index pairs), that payload —
 /// one spelling for the producer and every consumer.
 pub const WARNINGS: &str = "warnings";
 /// The warning map's name field (typed node warnings).
 pub const WARNING_NAME: &str = "name";
 /// The warning map's payload field (typed node warnings): the
-/// `AllNodesScan` warning's suggested property index text.
+/// `LabelDisjunctionScan` warning's index-pair text.
 pub const WARNING_INDEX: &str = "index";
 /// The Neo4j-facing root args (ADR-0357): the plan's rendered text —
 /// Neo4j's plan root carries it and tooling (Browser's Code tab,

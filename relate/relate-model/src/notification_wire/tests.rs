@@ -400,7 +400,7 @@ fn neo4j_entries_are_ordered_and_fold_the_remedy() {
 fn native_wire_form_carries_the_adr_keys() {
     let operator = Notification::new(
         NotificationKind::AllNodesScan,
-        "the scan matches every node; consider the property index (:Person(name))",
+        "the scan matches every node; add a label to narrow it",
     )
     .with_operator_id(3);
     assert_eq!(
@@ -411,7 +411,7 @@ fn native_wire_form_carries_the_adr_keys() {
             "severity": "INFORMATION",
             "category": "PERFORMANCE",
             "title": "All nodes scan",
-            "description": "the scan matches every node; consider the property index (:Person(name))",
+            "description": "the scan matches every node; add a label to narrow it",
             "remedy": "Name the label the scan intends (`MATCH (n:<Label>)`); on the index's \
                        label the scan becomes an index-backed lookup.",
             "operator_id": 3,

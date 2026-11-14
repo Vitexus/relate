@@ -195,12 +195,9 @@ fn warnings_footer_line_joins_ids_and_messages() {
     assert_eq!(
         warnings_footer_line(&[
             (1, "estimated rows 10x or more above the actual rows"),
-            (
-                3,
-                "the scan matches every node; consider the property index"
-            ),
+            (3, "the scan matches every node; add a label to narrow it"),
         ]),
         "Warnings: Id 1: estimated rows 10x or more above the actual rows; \
-     Id 3: the scan matches every node; consider the property index"
+     Id 3: the scan matches every node; add a label to narrow it"
     );
 }

@@ -601,7 +601,7 @@ fn table_mode_renders_the_warnings_column_and_footer_line() {
 #[test]
 fn table_mode_escapes_the_warnings_footer() {
     // The footer embeds the same warning texts as the `Warnings` cells, and
-    // `AllNodesScan` carries catalog index text — a control sequence in an
+    // `LabelDisjunctionScan` carries catalog index text — a control sequence in an
     // index label must not reach the terminal raw.
     let cols = vec!["plan".to_string()];
     let rows = vec![
@@ -614,8 +614,8 @@ fn table_mode_escapes_the_warnings_footer() {
         Vec::new(),
         vec![
             relate::PlanNode::new("AllNodesScan", "(n)".to_string(), Vec::new(), Vec::new())
-                .with_warnings(vec![relate::PlanWarning::AllNodesScan {
-                    index: ":Person(\u{1b}[31m)".to_string(),
+                .with_warnings(vec![relate::PlanWarning::LabelDisjunctionScan {
+                    indexes: ":Person(\u{1b}[31m)".to_string(),
                 }]),
         ],
     );

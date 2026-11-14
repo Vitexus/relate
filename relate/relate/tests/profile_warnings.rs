@@ -40,8 +40,8 @@ fn explain_warns_a_cartesian_product_on_a_disjoint_multi_pattern_match() {
 }
 
 /// A label-less scan while the store carries a property index: the affected
-/// `AllNodesScan` operator carries the typed `AllNodesScan` warning naming
-/// the existing index.
+/// `AllNodesScan` operator carries the typed `AllNodesScan` warning, which
+/// advises a label and names no index.
 #[test]
 fn explain_warns_an_all_nodes_scan_when_a_property_index_exists() {
     let mut conn = connection();
@@ -52,10 +52,8 @@ fn explain_warns_an_all_nodes_scan_when_a_property_index_exists() {
     let affected = find_node(tree, "AllNodesScan").expect("the label-less scan");
     assert_eq!(
         affected.warnings,
-        [relate::PlanWarning::AllNodesScan {
-            index: ":Person(name)".to_string(),
-        }],
-        "the suggestion names the existing property index: {affected:?}",
+        [relate::PlanWarning::AllNodesScan],
+        "the warning advises a label, no index: {affected:?}",
     );
 
     // A labeled scan on the same store: the warning is the label-less

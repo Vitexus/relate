@@ -290,13 +290,7 @@ mod tests {
             "ProduceResults",
             String::new(),
             Vec::new(),
-            vec![warned(
-                1,
-                "AllNodesScan",
-                vec![PlanWarning::AllNodesScan {
-                    index: ":Person(name)".to_string(),
-                }],
-            )],
+            vec![warned(1, "AllNodesScan", vec![PlanWarning::AllNodesScan])],
         )
         .with_warnings(vec![PlanWarning::CartesianProduct]);
         root.id = 0;
@@ -313,7 +307,7 @@ mod tests {
         );
         assert_eq!(
             notifications[1].description(),
-            "the scan matches every node; consider the property index (:Person(name))"
+            "the scan matches every node; add a label to narrow it"
         );
 
         // Two nodes carrying the same warning: one entry, the first node's
@@ -323,20 +317,8 @@ mod tests {
             String::new(),
             Vec::new(),
             vec![
-                warned(
-                    1,
-                    "AllNodesScan",
-                    vec![PlanWarning::AllNodesScan {
-                        index: ":Person(name)".to_string(),
-                    }],
-                ),
-                warned(
-                    2,
-                    "AllNodesScan",
-                    vec![PlanWarning::AllNodesScan {
-                        index: ":Person(name)".to_string(),
-                    }],
-                ),
+                warned(1, "AllNodesScan", vec![PlanWarning::AllNodesScan]),
+                warned(2, "AllNodesScan", vec![PlanWarning::AllNodesScan]),
             ],
         );
         let deduped = tree_notifications(&tree(duplicated));

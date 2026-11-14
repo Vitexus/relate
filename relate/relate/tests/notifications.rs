@@ -268,7 +268,7 @@ fn explain_all_nodes_scan_projects_the_warning_text_to_a_notification() {
     assert_eq!(notification.title(), "All nodes scan");
     assert_eq!(
         notification.description(),
-        "the scan matches every node; consider the property index (:Person(name))"
+        "the scan matches every node; add a label to narrow it"
     );
     let tree = common::plan(&explained);
     let scan = tree.children.first().expect("the scan operator");

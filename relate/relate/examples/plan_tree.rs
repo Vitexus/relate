@@ -77,16 +77,14 @@ fn main() -> Result<()> {
     );
 
     // Typed warnings (typed node warnings): a label-less scan on a store
-    // that carries a property index carries the `AllNodesScan` warning naming
-    // the existing index — rendered beside the affected operator in the
+    // that carries a property index carries the `AllNodesScan` warning advising
+    // a label (it names no index) — rendered beside the affected operator in the
     // `Warnings` column and footer by the boundary's plan table.
     conn.query("CREATE INDEX person_name FOR (n:Person) ON (n.name)")?;
     let scan = conn.explain_plan("MATCH (n) RETURN n")?;
     assert_eq!(
         scan.children[0].warnings,
-        [relate::PlanWarning::AllNodesScan {
-            index: ":Person(name)".to_string()
-        }]
+        [relate::PlanWarning::AllNodesScan]
     );
 
     // The PROFILE tree: every executed clause operator carries its

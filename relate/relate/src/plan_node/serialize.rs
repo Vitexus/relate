@@ -347,7 +347,7 @@ impl PlanNode {
         }
         // The typed warnings (typed node warnings): serialized as warning
         // maps — the shared vocabulary's name plus the warning's payload
-        // (the `AllNodesScan` warning's suggested index) when it carries
+        // (the `LabelDisjunctionScan` warning's index pairs) when it carries
         // one, present only when the node carries one, so the wire
         // consumer renders the engine's own message text.
         if !self.warnings.is_empty() {
@@ -367,7 +367,7 @@ impl PlanNode {
 }
 
 /// One warning's wire map (ADR-0345): the shared vocabulary's `name` plus
-/// the warning's payload — the `AllNodesScan` warning's suggested index —
+/// the warning's payload — the `LabelDisjunctionScan` warning's index pairs —
 /// when the typed warning carries one. The one spelling of the warning
 /// wire shape, beside [`PlanNode::node_map`] which assembles it.
 fn warning_value(warning: &PlanWarning) -> Value {
@@ -396,9 +396,7 @@ mod tests {
     #[test]
     fn to_value_serializes_warnings_by_name() {
         let node = PlanNode::new("AllNodesScan", "()".to_string(), Vec::new(), Vec::new())
-            .with_warnings(vec![PlanWarning::AllNodesScan {
-                index: ":Person(name)".to_string(),
-            }]);
+            .with_warnings(vec![PlanWarning::AllNodesScan]);
         let Value::Map(node) = node.to_value() else {
             panic!("the wire node is a map");
         };
@@ -434,11 +432,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             all_nodes_scan,
-            vec![(
-                "AllNodesScan".to_string(),
-                Some(":Person(name)".to_string())
-            )],
-            "the name and the payload are the wire spelling"
+            vec![("AllNodesScan".to_string(), None)],
+            "the name is the wire spelling and the warning carries no payload"
         );
         // A node with no warnings carries no `warnings` key — never an
         // empty list fabricated beside the absent ones.
