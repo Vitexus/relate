@@ -64,4 +64,15 @@ extension CypherValue {
         default: nil
         }
     }
+
+    /// What a sequence read sees: a list's items, or a vector as the list
+    /// of its coordinates; `nil` for any other value.
+    var sequenceItems: [CypherValue]? {
+        switch self {
+        case .list(let values): values
+        case .vector(.floats(_, let values)): values.map(CypherValue.float)
+        case .vector(.ints(_, let values)): values.map(CypherValue.int)
+        default: nil
+        }
+    }
 }

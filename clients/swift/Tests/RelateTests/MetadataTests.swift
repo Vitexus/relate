@@ -123,13 +123,14 @@ private enum HostileRawValue: String, CypherValueConvertible {
         // value itself, all of which come from the engine's result.
         let record = Record(
             index: ColumnIndex([hostile]), values: [.map([hostile: .string(hostile)])])
-        let mismatches = [
-            try resultMismatch { _ = try record.get(hostile, as: [String: Int].self) },
-            try resultMismatch { _ = try record.get("absent", as: Int.self) },
-            try resultMismatch { _ = try HostileRawValue(cypherValue: .string(hostile)) },
-        ]
-        #expect(mismatches[0].path == [hostile, hostile] && mismatches[2].reason?.contains(hostile) == true)
-        for mismatch in mismatches {
+        let nested = try resultMismatch { _ = try record.get(hostile, as: [String: Int].self) }
+        let absent = try resultMismatch { _ = try record.get("absent", as: Int.self) }
+        let raw = try resultMismatch { _ = try HostileRawValue(cypherValue: .string(hostile)) }
+        // The fields hold the strings as they are; only the message is sanitized.
+        #expect(nested.path == [hostile, hostile])
+        #expect(absent.path == ["absent"])
+        #expect(raw.reason?.contains(hostile) == true)
+        for mismatch in [nested, absent, raw] {
             assertSanitized(mismatch.message)
             #expect(mismatch.message.contains("\\u000d\\u000a"))
             #expect(RelateError.unexpectedResult(mismatch).message == mismatch.message)

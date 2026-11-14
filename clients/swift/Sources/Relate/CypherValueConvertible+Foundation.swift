@@ -59,8 +59,7 @@ extension Data: CypherValueConvertible {
     /// as not being `Data`; a list element that is not a byte is reported
     /// at its position.
     public init(cypherValue: CypherValue) throws(RelateError) {
-        _ = try payload(\.listValue, of: cypherValue, as: Data.self)
-        self = Data(try [UInt8](cypherValue: cypherValue))
+        self = Data(try [UInt8](items: try payload(\.listValue, of: cypherValue, as: Data.self)))
     }
 }
 

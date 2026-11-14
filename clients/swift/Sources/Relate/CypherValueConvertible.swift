@@ -153,15 +153,11 @@ extension Array: CypherValueConvertible where Element: CypherValueConvertible {
 
     /// A `.list`, or a `.vector` read as the list of its coordinates.
     public init(cypherValue: CypherValue) throws(RelateError) {
-        let items: [CypherValue]
-        if let values = cypherValue.listValue {
-            items = values
-        } else {
-            switch try payload(\.vectorValue, of: cypherValue, as: [Element].self) {
-            case .floats(_, let values): items = values.map(CypherValue.float)
-            case .ints(_, let values): items = values.map(CypherValue.int)
-            }
-        }
+        try self.init(items: try payload(\.sequenceItems, of: cypherValue, as: [Element].self))
+    }
+
+    /// The elements `items` convert to, a mismatch naming its position.
+    init(items: [CypherValue]) throws(RelateError) {
         var elements: [Element] = []
         elements.reserveCapacity(items.count)
         for (index, item) in items.enumerated() {
