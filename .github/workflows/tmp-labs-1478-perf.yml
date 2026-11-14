@@ -1,6 +1,6 @@
-# TEMPORARY (LABS-1478): bisects the expansion_3 regression of the rebased
-# memo. Times five binaries interleaved on one runner. Delete with the PR;
-# never merge.
+# TEMPORARY (LABS-1478): settles the expansion_3 discrepancy. Times main and
+# the memo head in two modes on one runner: one group per process, and the
+# whole suite in one process. Delete with the PR; never merge.
 name: tmp-labs-1478-perf
 on:
   push:
@@ -11,20 +11,22 @@ on:
     inputs:
       rounds:
         description: interleaved timing rounds
-        default: "4"
+        default: "3"
 jobs:
   perf:
     runs-on: linux-4-core-x86
-    timeout-minutes: 120
+    timeout-minutes: 150
     env:
       CARGO_TARGET_DIR: /home/runner/work/shared-target
-      # name:sha. main1/v2 share a base; main2/bitmap share a base; old is
-      # the original measured head on its original base (the control).
-      VARIANTS: "main1:38482a98 v2:HEAD main2:b3473a1a bitmap:adac86bc old:50eaaa15"
+      VARIANTS: "main1:38482a98 v2:HEAD"
     steps:
       - uses: actions/checkout@v4
         with: { path: repo, fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@1.88.0
+      - name: runner identity
+        run: |
+          lscpu | grep -E 'Model name|^CPU\(s\)|L3 cache'
+          free -m | head -2
       - name: build every variant
         run: |
           mkdir bins
@@ -34,24 +36,27 @@ jobs:
             git -C repo worktree add "../wt_$n" "$s"
             (cd "wt_$n" && cargo build --release -p relate-query-latency --bin pokec_profile && cp "$CARGO_TARGET_DIR/release/pokec_profile" "../bins/$n")
           done
-      - name: timed expansion_3, interleaved
+      - name: isolated, one group per process
         run: |
-          rounds="${{ github.event.inputs.rounds || '4' }}"
+          rounds="${{ github.event.inputs.rounds || '3' }}"
           for r in $(seq "$rounds"); do
             for v in $VARIANTS; do
               n="${v%%:*}"
-              echo -n "$n: "; ./bins/$n medium --group expansion_3 | grep 'expansion_3:'
+              echo "== iso $n"; ./bins/$n medium --group expansion_3 | grep -E ': [0-9]+ ms'
             done
-          done | tee ab.txt
-      - name: sampled runs
+          done | tee iso.txt
+      - name: whole suite in one process
         run: |
-          for v in $VARIANTS; do
-            n="${v%%:*}"
-            ./bins/$n medium --group expansion_3 --sample "sample_$n"
-          done
+          rounds="${{ github.event.inputs.rounds || '3' }}"
+          for r in $(seq "$rounds"); do
+            for v in $VARIANTS; do
+              n="${v%%:*}"
+              echo "== full $n"; ./bins/$n medium | grep -E ': [0-9]+ ms'
+            done
+          done | tee full.txt
       - uses: actions/upload-artifact@v4
         with:
           name: labs-1478-perf
           path: |
-            ab.txt
-            sample_*
+            iso.txt
+            full.txt
