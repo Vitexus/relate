@@ -113,11 +113,20 @@ run_helper() {
   [ -f "${secret}" ]
 }
 
-@test "a findings file tracked at HEAD is rejected even though it survives the reset" {
+@test "a findings file force-added into the merge ref survives the reset and is still rejected" {
+  # The poster inline comment's threat (OPLANE_REQ-00333782): a PR
+  # force-adds .stellar/findings.json into its merge ref, so the event
+  # payload's SHA — the RESTORE_SHA the reset targets — points at a
+  # commit that tracks the planted file. It genuinely survives the
+  # reset and would pose as model output, steering the poster onto
+  # the pass-capable branch; the fixture mirrors that world by
+  # re-pointing RESTORE_SHA at the force-adding commit.
   make_repo
   echo '{"forced": true}' > "${REPO}/.stellar/findings.json"
   git -C "${REPO}" add -f .stellar/findings.json
   git -C "${REPO}" commit -qm "force-add findings"
+  RESTORE_SHA="$(git -C "${REPO}" rev-parse HEAD)"
+  export RESTORE_SHA
   run_helper .stellar/findings.json
   [ "$status" -eq 0 ]
   [[ "$output" == *"rejecting non-model output .stellar/findings.json (symlink or tracked at HEAD) — deleting"* ]]
