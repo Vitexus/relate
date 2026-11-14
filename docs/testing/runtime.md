@@ -404,12 +404,17 @@ preamble was hand-copied into 18 ci.yml jobs; one copy already drifted (the
 free-disk-on-4-core bug, fixed in round 3). The preamble is now one
 composite action with per-lane inputs (`sccache`,
 `toolchain-components`/`toolchain-targets`, `free-disk`,
-`free-disk-aggressive`, `mold`, `cache`, `cache-shared-key`,
+`free-disk-aggressive`, `mold`, `cache-shared-key`,
 `cache-save-if-cold-only`, `cache-workspace-crates`). Behavior is
 byte-identical to the replaced blocks — same steps, same order (sccache →
 toolchain → free-disk → mold install → mold env → cache), same env writes;
 verified by expanding every job's step list against the pre-change
-workflow. The `failfast` job keeps its bespoke conditional rustfmt-only
+workflow. Later, the toolchain steps (toolchain, free-disk, mold) moved
+into a toolchain-only core (`.github/actions/setup-rust-ci-core`) that the
+wrapper runs in the same position, so the release stamp-ref lanes can take
+the toolchain without any cache step entering their call graph
+([build-caches.md](build-caches.md), "Release workflow lanes"). The
+`failfast` job keeps its bespoke conditional rustfmt-only
 toolchain (it installs no toolchain at all unless the previous run failed
 Lint). The corpus job is the one intentional step-level change: it gains a
 nextest install for the TCK swap below.

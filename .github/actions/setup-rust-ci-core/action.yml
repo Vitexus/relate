@@ -1,0 +1,94 @@
+# The toolchain-only half of the shared Rust CI preamble (LABS-310
+# round 4's block, split): the pinned toolchain + free-disk + mold
+# steps with no cache machinery of any kind — no rust-cache, no
+# actions/cache, no sccache setup. The release stamp-ref lanes
+# (release.yml's ffi and npm-wasm jobs, which build from the
+# swift-stamp job's output sha) call this core directly so their
+# static call graph contains no cache save or restore at all: the
+# CodeQL cache-poisoning model reads the step graph, not wrapper
+# inputs, so a cache-carrying wrapper turned off per-input still
+# leaves the cache steps reachable and the alert standing.
+#
+# setup-rust-ci is the cache-carrying wrapper: it runs this core
+# between its sccache and rust-cache steps, so the toolchain steps
+# have one home (here) and the two wrappers share the identical
+# underlying step list — no duplicated toolchain step text. The step
+# order inside the wrapper is unchanged from round 4 (sccache ->
+# toolchain -> free-disk -> mold install -> mold env -> cache), and
+# the mold RUSTFLAGS write below must stay before the caller's
+# rust-cache step (it feeds the rust-cache env hash; a RUSTFLAGS
+# change invalidates cargo fingerprints).
+#
+# Checkout stays the job's own first step; this action runs
+# immediately after it. Unlike the wrapper it does not patch the CA
+# store: its callers either run under the wrapper (which patches
+# first) or are release lanes that carry the inline pre-checkout
+# patch (.github/actions/ca-certificates-patch explains the two
+# spellings).
+name: Setup Rust CI (toolchain only)
+description: >-
+  Install the pinned Rust toolchain, free runner disk, and
+  install/select the mold linker — the cache-free core of the shared
+  Rust CI preamble, for lanes whose static call graph must contain no
+  cache save or restore (the release stamp-ref lanes).
+inputs:
+  toolchain-components:
+    description: >-
+      Comma-separated rustup components for dtolnay/rust-toolchain (e.g.
+      "rustfmt, clippy"). Empty installs no extra components.
+    default: ""
+  toolchain-targets:
+    description: >-
+      Comma-separated rustup targets (e.g. "wasm32-unknown-unknown"). Empty
+      installs no extra targets.
+    default: ""
+  free-disk:
+    description: >-
+      Run scripts/free-disk.sh on Linux. False on the bigger-runner lanes
+      (~150 GB SSD) where the cleanup time buys nothing.
+    default: "true"
+  free-disk-aggressive:
+    description: >-
+      Pass FREE_DISK_AGGRESSIVE=1 to free-disk.sh (the 8-dir trim). Only for
+      pure-Rust jobs that run no language setup action afterwards.
+    default: "false"
+  mold:
+    description: >-
+      Install mold and link Linux builds with it (ADR-0255). The steps are
+      Linux-guarded, so leaving this true on macOS/Windows jobs is a no-op.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    # Keep @rev in sync with rust-toolchain.toml (channel = "1.88.0"): the
+    # action installs the toolchain named by @rev, including any
+    # components/targets; @stable would put them on a toolchain nothing uses
+    # because cargo resolves rust-toolchain.toml instead.
+    - uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759 # 1.88.0
+      with:
+        components: ${{ inputs.toolchain-components }}
+        targets: ${{ inputs.toolchain-targets }}
+
+    # LABS: ubuntu runners ran out of disk in the linker (No space left on
+    # device) on multi-feature build lanes; drop preinstalled toolchains and
+    # docker images these Rust-only jobs never touch.
+    - name: Free runner disk (Linux)
+      if: runner.os == 'Linux' && inputs.free-disk == 'true'
+      shell: bash
+      env:
+        FREE_DISK_AGGRESSIVE: ${{ inputs.free-disk-aggressive == 'true' && '1' || '0' }}
+      run: scripts/free-disk.sh
+
+    # ADR-0255: mold links the debug-binary-heavy builds. The RUSTFLAGS
+    # string is identical on every Linux lane and set before the caller's
+    # rust-cache step (setup-rust-ci) so it lands in the cache env hash (a
+    # RUSTFLAGS change invalidates cargo fingerprints; restoring a
+    # pre-mold cache would be a wasted download).
+    - name: Install mold linker (Linux)
+      if: runner.os == 'Linux' && inputs.mold == 'true'
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y mold
+    - name: Link with mold (Linux)
+      if: runner.os == 'Linux' && inputs.mold == 'true'
+      shell: bash
+      run: echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
