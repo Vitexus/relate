@@ -5,11 +5,12 @@ Pins the posting-path verdict derivation on a fixture findings document:
 ADR-0258's severity gate (any Critical/High/Medium finding fails, only-Low
 or none passes), the marker line the enforce gate's tier 3 parses (its
 count is the fail-severity count — the number that made the check fail),
-the verdict-file landing through the real posting path, and the no-op and
-fail-closed marker lines. Also pins the per-kind no-op gates (rust:
-*.rs/Cargo.toml/Cargo.lock; security: any code change, or the
-always-relevant CI-control paths) and the check subcommand's distinct
-diagnoses.
+the verdict-file landing through the real posting path (the shared
+stellar choreography, threaded with the kind's marker), the dry-run
+dump, and the no-op and fail-closed marker lines. Also pins the
+per-kind no-op gates (rust: *.rs/Cargo.toml/Cargo.lock; security: any
+code change, or the always-relevant CI-control paths) and the check
+subcommand's distinct diagnoses.
 """
 
 import argparse
@@ -76,15 +77,25 @@ def finding(**overrides):
 @contextmanager
 def patched_gh(summary):
     """Swap the stellar posting core's gh and summary discovery for fakes
-    that record payloads; the poster shares that core by import, so the
-    patch rides the module attribute it calls through."""
+    that record payloads (and each discovery call's marker) into a sink;
+    the poster shares that core by import, so the patch rides the module
+    attributes it calls through."""
     stellar = SUBJECT.stellar_post
     orig_gh, orig_find = stellar.gh, stellar.find_summary_comment
     sink = []
-    stellar.gh = lambda *a, input_path=None: (
-        sink.append((a[0], json.load(open(input_path)))) if input_path else None
-    ) or ""
-    stellar.find_summary_comment = lambda repo, pr, marker=None: summary
+
+    def fake_gh(*a, input_path=None):
+        if input_path:
+            with open(input_path) as fh:
+                sink.append((a[0], json.load(fh)))
+        return ""
+
+    def fake_find(repo, pr, marker=None):
+        sink.append(("marker", marker))
+        return summary
+
+    stellar.gh = fake_gh
+    stellar.find_summary_comment = fake_find
     try:
         yield sink
     finally:
@@ -225,10 +236,35 @@ class PostingPathTests(unittest.TestCase):
         # the enforce gate's tier 3 parses this exact no-op phrase
         self.assertIn("**Rust review:** no rust-relevant changes", body)
         self.assertIn("<!-- opencode-verdict: pass -->", body)
+        # the landing went through the stellar core's choreography with
+        # the kind's marker — the one derivation (marker_for)
+        self.assertIn(("marker", "**Rust review:**"), sink)
+
+    def test_dry_run_dumps_the_payload_and_lands_nothing(self):
+        with patched_gh(None) as sink:
+            code, out, _ = run_command(
+                SUBJECT.cmd_post, findings=write_fixture(self.dir),
+                verdict_file=self.verdict_file, dry_run=True,
+            )
+        self.assertEqual(code, 0)
+        # the shared dump: review payload, verdict, summary — the same
+        # three blocks the stellar lane's dry run prints
+        self.assertIn('"event": "COMMENT"', out)
+        self.assertIn("--- verdict: fail", out)
+        self.assertIn("**Rust review:** ⚠️ 2 issue(s) flagged inline", out)
+        # nothing landed: no gh call at all, no verdict file
+        self.assertEqual(sink, [])
+        self.assertFalse(os.path.exists(self.verdict_file))
 
 
 class GateTests(unittest.TestCase):
-    """The per-kind no-op gates, computed by script from the facts."""
+    """The per-kind no-op gates, computed by script from the facts: the
+    case tables assert the relevance predicate directly (spec.is_relevant
+    against booleans); cmd_gate's true/false output mapping — the
+    negation of the predicate — is pinned once in its own test."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
 
     @staticmethod
     def facts(paths, has_code_changes=None):
@@ -239,38 +275,55 @@ class GateTests(unittest.TestCase):
 
     def test_rust_gate(self):
         cases = [
-            (self.facts(["docs/adr/0001-x.md", "README.md"]), "true"),
-            (self.facts(["relate/relate/src/lib.rs"]), "false"),
-            (self.facts(["surfaces/relate-cli/Cargo.toml"]), "false"),
-            (self.facts(["Cargo.lock"]), "false"),
+            (self.facts(["docs/adr/0001-x.md", "README.md"]), False),
+            (self.facts(["relate/relate/src/lib.rs"]), True),
+            (self.facts(["surfaces/relate-cli/Cargo.toml"]), True),
+            (self.facts(["Cargo.lock"]), True),
             # a deleted Rust file is still a Rust change — the path is listed
-            (self.facts(["relate/relate/src/gone.rs", "docs/x.md"]), "false"),
+            (self.facts(["relate/relate/src/gone.rs", "docs/x.md"]), True),
         ]
-        for facts_doc, expected in cases:
+        for facts_doc, relevant in cases:
             with self.subTest(files=[f["path"] for f in facts_doc["files"]]):
                 spec = SUBJECT.kind_spec("Rust review")
-                self.assertEqual("true" if not spec.is_relevant(facts_doc) else "false",
-                                 expected)
+                self.assertIs(spec.is_relevant(facts_doc), relevant)
 
     def test_security_gate(self):
         cases = [
-            (self.facts(["docs/adr/0001-x.md", "README.md"], has_code_changes=False), "true"),
+            (self.facts(["docs/adr/0001-x.md", "README.md"], has_code_changes=False), False),
             # any code change is security-relevant
-            (self.facts(["relate/relate/src/lib.rs"]), "false"),
+            (self.facts(["relate/relate/src/lib.rs"]), True),
             # the CI-control paths are always security-relevant — even a
             # docs-classified diff that touches only them
             (self.facts([".github/prompts/opencode-review-protocol.md"],
-                        has_code_changes=False), "false"),
+                        has_code_changes=False), True),
             (self.facts([".github/workflows/ci.yml", "docs/x.md"],
-                        has_code_changes=False), "false"),
+                        has_code_changes=False), True),
+            (self.facts([".github/actions/setup-rust/action.yml"],
+                        has_code_changes=False), True),
+            (self.facts([".github/dependabot.yml"], has_code_changes=False), True),
+            (self.facts([".github/CODEOWNERS"], has_code_changes=False), True),
             (self.facts([".agents/skills/security-review/SKILL.md"],
-                        has_code_changes=False), "false"),
+                        has_code_changes=False), True),
         ]
-        for facts_doc, expected in cases:
+        for facts_doc, relevant in cases:
             with self.subTest(files=[f["path"] for f in facts_doc["files"]]):
                 spec = SUBJECT.kind_spec("Security review")
-                self.assertEqual("true" if not spec.is_relevant(facts_doc) else "false",
-                                 expected)
+                self.assertIs(spec.is_relevant(facts_doc), relevant)
+
+    def test_gate_command_prints_the_gate_boolean(self):
+        """cmd_gate's output mapping, pinned once: 'true' when the gate
+        holds (nothing kind-relevant changed — the negation of the
+        predicate), 'false' when it does not."""
+        docs_only = os.path.join(self.dir, "docs-facts.json")
+        with open(docs_only, "w") as fh:
+            json.dump(self.facts(["docs/adr/0001-x.md"]), fh)
+        code, out, _ = run_command(SUBJECT.cmd_gate, facts=docs_only)
+        self.assertEqual((code, out.strip()), (0, "true"))
+        rust = os.path.join(self.dir, "rust-facts.json")
+        with open(rust, "w") as fh:
+            json.dump(self.facts(["relate/relate/src/lib.rs"]), fh)
+        code, out, _ = run_command(SUBJECT.cmd_gate, facts=rust)
+        self.assertEqual((code, out.strip()), (0, "false"))
 
     def test_unknown_kind_is_a_loud_failure(self):
         with self.assertRaises(SystemExit):

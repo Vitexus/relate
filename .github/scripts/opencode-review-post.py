@@ -12,9 +12,11 @@ writes .opencode-verdict.txt. The fail-closed chain through
 .github/scripts/enforce-opencode-verdict.sh is unchanged.
 
 The GitHub mechanics — the gh wrapper, payload files, the review POST
-with its degrade policy, the summary upsert, the verdict write, and the
-sanitize boundary for model text — are stellar-review's post.py, the
-one canonical implementation, shared by import.
+with its degrade policy, the summary upsert, the verdict write, the
+sanitize boundary for model text, and the shared command layer (the
+findings-file read-and-diagnose gate, the dry-run dump, the fixed-round
+landing, the verdict comment) — are stellar-review's post.py, the one
+canonical implementation, shared by import.
 
 Commands:
     gate   Print true/false — whether the kind's no-op gate holds (the
@@ -35,9 +37,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
+from collections.abc import Callable
 
 # The stellar poster owns the one gh/posting core (the same dependency
 # .github/scripts/stellar-prep.sh already spells); it is imported, not
@@ -60,13 +64,19 @@ SEVERITY_RANK = {name: rank for rank, name in enumerate(SEVERITIES)}
 REQUIRED_FIELDS = ("path", "line", "severity", "category", "title", "why", "fix")
 
 # The security lane's always-relevant paths: these control what code and
-# instructions run in CI with secrets, so they always warrant the full
-# review. The old prompt spelled this rule for the model; the script is
-# now the one spelling, and the model only runs when it holds.
+# instructions run in CI with secrets — the workflows and the actions
+# they compose, the scripts and prompts they run, the skills that steer
+# agents, the dependency-update policy, and who owns review approval —
+# so they always warrant the full review. The old prompt spelled this
+# rule for the model; the script is now the one spelling, and the model
+# only runs when it holds.
 ALWAYS_RELEVANT_PREFIXES = (
     ".github/workflows/",
+    ".github/actions/",
     ".github/scripts/",
     ".github/prompts/",
+    ".github/dependabot.yml",
+    ".github/CODEOWNERS",
     ".agents/skills/",
 )
 RUST_SUFFIXES = (".rs",)
@@ -89,30 +99,30 @@ def _security_relevant(facts: dict) -> bool:
     return bool(facts["has_code_changes"])
 
 
+@dataclasses.dataclass(frozen=True)
 class KindSpec:
     """One review kind's posting surface: the no-op gate's relevance rule
     (`gate` is the negation — nothing kind-relevant changed) and the
     summary texts. Presentation and gate live in one registry entry so
-    the two can never drift apart per kind."""
+    the two can never drift apart per kind. The kind's name is the
+    registry key — the one spelling of the vocabulary — so the entry
+    never repeats it as a field; the lane marker derives from the key
+    (marker_for), never from a second copy."""
 
-    def __init__(self, kind, heading, posture, noop_note, is_relevant):
-        self.kind = kind
-        self.heading = heading
-        self.posture = posture
-        self.noop_note = noop_note
-        self.is_relevant = is_relevant
+    heading: str
+    posture: str
+    noop_note: str
+    is_relevant: Callable[[dict], bool]
 
 
 KINDS = {
     "Rust review": KindSpec(
-        kind="Rust review",
         heading="**Rust review** (rust-reviewer skill, full review)",
         posture="The rust-reviewer skill performed a full review of the pull request diff.",
         noop_note="no rust-relevant changes (no Rust files modified). ✅",
         is_relevant=_rust_relevant,
     ),
     "Security review": KindSpec(
-        kind="Security review",
         heading="**Security review** (security-review skill)",
         posture="The security-review skill reviewed the pull request diff for security issues.",
         noop_note="no security-relevant changes. ✅",
@@ -133,24 +143,19 @@ def kind_spec(kind: str) -> KindSpec:
         ) from None
 
 
+def marker_for(kind: str) -> str:
+    """The lane marker `**<kind>:**`, derived once from the registry key.
+    It is the load-bearing string of the whole gate: summary discovery
+    (find_summary_comment) matches it at line start, and the enforce
+    gate's tier 3 parses lines that start with it. Every consumer —
+    marker_line, the summary openers, the land_round/land_fixed_round
+    calls — consults this one derivation, so the rendered marker lines
+    and the discovery key agree by construction."""
+    return f"**{kind}:**"
+
+
 # ---------------------------------------------------------------------------
 # findings validation
-
-
-def findings_doc_shape_error(doc: object) -> str | None:
-    """The kind findings document's envelope contract: None when valid,
-    else the offending-key diagnosis. check (the workflow's gate) and
-    post's own load consume the same ruling, so the gate and the poster
-    can never decide differently on one document. `type(v) is not int`
-    keeps bool/float versions out — the contract names the integer."""
-    if not isinstance(doc, dict):
-        return "wrong shape — top level is not an object"
-    v = doc.get("version")
-    if type(v) is not int or v != 1:
-        return f"wrong shape — version is {v!r}, not 1"
-    if not isinstance(doc.get("findings"), list):
-        return "wrong shape — 'findings' is missing or not a list"
-    return None
 
 
 def findings_field_errors(doc: dict) -> str | None:
@@ -172,6 +177,16 @@ def findings_field_errors(doc: dict) -> str | None:
     return None
 
 
+def kind_findings_error(doc: object) -> str | None:
+    """The kind findings contract, composed once: the shared envelope —
+    stellar post.py's findings_doc_shape_error, the one spelling of
+    'this is a version-1 findings document', imported not copied — plus
+    the per-finding contract above. check (the workflow's gate) and
+    post's own load consume this one composition, so the gate and the
+    poster can never decide differently on one document."""
+    return stellar_post.findings_doc_shape_error(doc) or findings_field_errors(doc)
+
+
 def sanitize_findings(findings: list[dict]) -> list[dict]:
     """Model text lands in inline comments and the summary; HTML-comment
     markers would let it forge the verdict marker or the stellar ledger
@@ -190,7 +205,7 @@ def load_findings(path: str) -> list[dict]:
     policy)."""
     with open(path) as fh:
         doc = json.load(fh)
-    error = findings_doc_shape_error(doc) or findings_field_errors(doc)
+    error = kind_findings_error(doc)
     if error is not None:
         raise SystemExit(f"{path}: {error}")
     return sanitize_findings(doc["findings"])
@@ -213,9 +228,10 @@ def marker_line(kind: str, verdict: str, failing: int) -> str:
     """The load-bearing verdict signal (ADR-0258): the enforce gate's
     tier 3 parses this line, summary discovery matches on its marker,
     and its value always agrees with the verdict file."""
+    marker = marker_for(kind)
     if verdict == "pass":
-        return f"**{kind}:** ✅ no issues found"
-    return f"**{kind}:** ⚠️ {failing} issue(s) flagged inline"
+        return f"{marker} ✅ no issues found"
+    return f"{marker} ⚠️ {failing} issue(s) flagged inline"
 
 
 def sorted_findings(findings: list[dict]) -> list[dict]:
@@ -230,11 +246,14 @@ def inline_body(f: dict) -> str:
             f"Why this matters: {f['why']}\nSuggested fix: {f['fix']}")
 
 
-def build_summary(spec: KindSpec, findings: list[dict], verdict: str,
+def build_summary(spec: KindSpec, kind: str, findings: list[dict], verdict: str,
                   failing: int) -> str:
     """Render the summary comment: heading, posture line, one bullet per
     finding (or 'No issues found.'), then the marker line and the
-    machine-readable verdict comment. Deterministic — no model prose."""
+    machine-readable verdict comment. `kind` is the registry key the
+    caller already holds (argparse's --kind choice) — the marker derives
+    from it, never from a repeated spec field. Deterministic — no model
+    prose."""
     lines = [spec.heading, "", spec.posture, ""]
     if findings:
         lines.extend(
@@ -245,8 +264,8 @@ def build_summary(spec: KindSpec, findings: list[dict], verdict: str,
     else:
         lines.append("No issues found.")
     lines.append("")
-    lines.append(marker_line(spec.kind, verdict, failing))
-    lines.append(f"<!-- opencode-verdict: {verdict} -->")
+    lines.append(marker_line(kind, verdict, failing))
+    lines.append(stellar_post.verdict_comment(verdict))
     return "\n".join(lines) + "\n"
 
 
@@ -264,28 +283,11 @@ def cmd_gate(args: argparse.Namespace) -> None:
 def cmd_check(args: argparse.Namespace) -> None:
     """The one findings-document gate for these lanes: print 'valid' and
     exit 0, or a distinct diagnosis and exit 1, so a no-findings round
-    names its cause instead of a conflated generic message."""
-    def reject(detail: str) -> None:
-        print(f"{args.findings}: {detail}", file=sys.stderr)
-        raise SystemExit(1)
-
-    try:
-        with open(args.findings, "rb") as fh:
-            raw = fh.read()
-    except FileNotFoundError:
-        reject("missing — the model run wrote no file")
-    if not raw.strip():
-        reject("empty — the file exists but holds no bytes")
-    try:
-        doc = json.loads(raw)
-    except UnicodeDecodeError:
-        reject("unparseable — not UTF-8 text (a half-flushed document)")
-    except json.JSONDecodeError as e:
-        reject(f"unparseable JSON — {e.msg} at line {e.lineno} column {e.colno}")
-    error = findings_doc_shape_error(doc) or findings_field_errors(doc)
-    if error is not None:
-        reject(error)
-    print("valid")
+    names its cause instead of a conflated generic message. The
+    read-and-diagnose ladder is the stellar core's
+    (check_findings_file, consumed by import); the lane's own contract
+    is the composed kind ruling (kind_findings_error)."""
+    stellar_post.check_findings_file(args.findings, kind_findings_error)
 
 
 def cmd_post(args: argparse.Namespace) -> None:
@@ -302,40 +304,33 @@ def cmd_post(args: argparse.Namespace) -> None:
         "body": f"{args.kind}: {len(comments)} inline finding(s); see summary comment.",
         "comments": comments,
     }
-    summary = build_summary(spec, findings, verdict, failing)
+    summary = build_summary(spec, args.kind, findings, verdict, failing)
     if args.dry_run:
-        print(json.dumps(review_doc, indent=2, sort_keys=True))
-        print("--- verdict:", verdict)
-        print(summary)
+        stellar_post.dry_run_dump(review_doc, verdict, summary)
         return
     # The review POST first (post_review's degrade policy is the one
     # home — a failed post degrades to summary-only, and both attempts
     # dying re-raises); the summary and verdict land through the one
-    # choreography, forced to fail if the summary upsert dies.
+    # choreography, forced to fail if the summary upsert dies. The kind
+    # lanes own no ledger state, so the stellar carry-forward policy is
+    # explicitly declined — the carry boundary.
     if comments:
         stellar_post.post_review(args.repo, args.pr, review_doc)
     stellar_post.land_round(args.repo, args.pr, summary, verdict, args.verdict_file,
-                            marker=f"**{args.kind}:**")
+                            marker=marker_for(args.kind), carry_ledger=False)
     print(f"post: {len(comments)} inline finding(s), verdict {verdict}", file=sys.stderr)
-
-
-def _land_fixed_round(args: argparse.Namespace, summary: str, verdict: str) -> None:
-    """The fixed-verdict commands' (noop, fail) full choreography: the
-    dry-run escape prints the summary and lands nothing; otherwise the
-    posting path is land_round's, with the kind's own marker."""
-    if args.dry_run:
-        print(summary)
-        return
-    stellar_post.land_round(args.repo, args.pr, summary, verdict, args.verdict_file,
-                            marker=f"**{args.kind}:**")
 
 
 def cmd_noop(args: argparse.Namespace) -> None:
     """Kind-irrelevant diffs: no model run, verdict pass, tidy summary —
-    the marker phrase matches the enforce gate's generic no-op tier."""
+    the marker phrase matches the enforce gate's generic no-op tier. The
+    landing choreography is the stellar core's land_fixed_round, with
+    the kind's marker and no ledger carry."""
     spec = kind_spec(args.kind)
-    summary = f"**{args.kind}:** {spec.noop_note}\n<!-- opencode-verdict: pass -->\n"
-    _land_fixed_round(args, summary, "pass")
+    summary = (f"{marker_for(args.kind)} {spec.noop_note}\n"
+               f"{stellar_post.verdict_comment('pass')}\n")
+    stellar_post.land_fixed_round(args, summary, "pass",
+                                  marker=marker_for(args.kind), carry_ledger=False)
 
 
 def cmd_fail(args: argparse.Namespace) -> None:
@@ -343,11 +338,14 @@ def cmd_fail(args: argparse.Namespace) -> None:
     no valid findings document — the check must fail loudly, not
     silently pass. The reason is model-adjacent text (the check
     diagnosis embeds raw model values), so it crosses the sanitize
-    boundary at this one site."""
-    summary = (f"**{args.kind}:** ⚠️ review failed to produce valid findings. "
+    boundary at this one site. The landing choreography is the stellar
+    core's land_fixed_round, with the kind's marker and no ledger
+    carry."""
+    summary = (f"{marker_for(args.kind)} ⚠️ review failed to produce valid findings. "
                f"Details: {stellar_post.sanitize(args.reason)}\n"
-               "<!-- opencode-verdict: fail -->\n")
-    _land_fixed_round(args, summary, "fail")
+               f"{stellar_post.verdict_comment('fail')}\n")
+    stellar_post.land_fixed_round(args, summary, "fail",
+                                  marker=marker_for(args.kind), carry_ledger=False)
 
 
 # One spec per subcommand — registration and dispatch both index this
