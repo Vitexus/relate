@@ -113,6 +113,20 @@ run_helper() {
   [ -f "${secret}" ]
 }
 
+@test "a model-created FIFO at the findings path is rejected without ever being opened — the post step cannot stall on it" {
+  # A FIFO is the cheapest non-regular file the model can plant: the
+  # poster's open() would block until a writer appears, stalling the
+  # post step. The gate must delete it on sight — stat only, never an
+  # open — so reaching the assertions below at all proves the helper
+  # did not hang on it.
+  make_repo
+  mkfifo "${REPO}/.stellar/findings.json"
+  run_helper .stellar/findings.json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rejecting non-model output .stellar/findings.json (symlink or tracked at HEAD) — deleting"* ]]
+  [ ! -e "${REPO}/.stellar/findings.json" ]
+}
+
 @test "a findings file force-added into the merge ref survives the reset and is still rejected" {
   # The poster inline comment's threat (OPLANE_REQ-00333782): a PR
   # force-adds .stellar/findings.json into its merge ref, so the event

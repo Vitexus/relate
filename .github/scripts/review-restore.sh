@@ -37,7 +37,9 @@
 #     writes it). .stellar is the model-output channel and survives.
 #   - Every findings file named as an argument is accepted only as a
 #     REGULAR, UNTRACKED file: a symlink (pointing anywhere, runner
-#     files included) or a file tracked at HEAD is deleted before
+#     files included), a file tracked at HEAD, or any other
+#     non-regular file (a model-created FIFO, socket or device at a
+#     findings path would stall the poster's read) is deleted before
 #     validation and treated as no output — a PR force-adding
 #     .stellar/findings.json would survive the reset and pose as model
 #     output, steering the poster onto the pass-capable branch
@@ -84,7 +86,7 @@ if [ "$NO_CLEAN" -ne 1 ]; then
 fi
 
 for f in "$@"; do
-  if [ -L "$f" ] || git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+  if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; } || git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
     echo "post: rejecting non-model output $f (symlink or tracked at HEAD) — deleting"
     rm -f "$f"
   fi
