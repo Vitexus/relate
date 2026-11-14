@@ -5,14 +5,6 @@
 # or mis-ordering one of these steps). Checkout stays the job's own first
 # step; this action runs immediately after it.
 #
-# This is the cache-carrying wrapper: the toolchain steps (toolchain,
-# free-disk, mold) live once in the toolchain-only core
-# (.github/actions/setup-rust-ci-core), which this action runs between
-# its sccache and rust-cache steps. The release stamp-ref lanes call
-# the core directly — their call graph must contain no cache step at
-# all — so any step added here must stay cache-shaped or move to the
-# core.
-#
 # Behavior is byte-identical to the replaced blocks: same steps, same order
 # (sccache -> toolchain -> free-disk -> mold install -> mold env -> cache),
 # same env writes. The mold RUSTFLAGS line must land BEFORE the cache step
@@ -53,6 +45,9 @@ inputs:
     description: >-
       Install mold and link Linux builds with it (ADR-0255). The steps are
       Linux-guarded, so leaving this true on macOS/Windows jobs is a no-op.
+    default: "true"
+  cache:
+    description: "Restore/save a rust-cache at all."
     default: "true"
   cache-shared-key:
     description: >-
@@ -115,19 +110,37 @@ runs:
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         fi
 
-    # The toolchain steps (toolchain + free-disk + mold) live once in
-    # the toolchain-only core; this wrapper runs the core exactly where
-    # those steps sat, between the sccache pair above and the
-    # rust-cache pair below. The release stamp-ref lanes call the core
-    # directly instead of this wrapper so no cache step is reachable
-    # from their checkout.
-    - uses: ./.github/actions/setup-rust-ci-core
+    # Keep @rev in sync with rust-toolchain.toml (channel = "1.88.0"): the
+    # action installs the toolchain named by @rev, including any
+    # components/targets; @stable would put them on a toolchain nothing uses
+    # because cargo resolves rust-toolchain.toml instead.
+    - uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759 # 1.88.0
       with:
-        toolchain-components: ${{ inputs.toolchain-components }}
-        toolchain-targets: ${{ inputs.toolchain-targets }}
-        free-disk: ${{ inputs.free-disk }}
-        free-disk-aggressive: ${{ inputs.free-disk-aggressive }}
-        mold: ${{ inputs.mold }}
+        components: ${{ inputs.toolchain-components }}
+        targets: ${{ inputs.toolchain-targets }}
+
+    # LABS: ubuntu runners ran out of disk in the linker (No space left on
+    # device) on multi-feature build lanes; drop preinstalled toolchains and
+    # docker images these Rust-only jobs never touch.
+    - name: Free runner disk (Linux)
+      if: runner.os == 'Linux' && inputs.free-disk == 'true'
+      shell: bash
+      env:
+        FREE_DISK_AGGRESSIVE: ${{ inputs.free-disk-aggressive == 'true' && '1' || '0' }}
+      run: scripts/free-disk.sh
+
+    # ADR-0255: mold links the debug-binary-heavy builds. The RUSTFLAGS
+    # string is identical on every Linux lane and set BEFORE rust-cache so
+    # it lands in the cache env hash (a RUSTFLAGS change invalidates cargo
+    # fingerprints; restoring a pre-mold cache would be a wasted download).
+    - name: Install mold linker (Linux)
+      if: runner.os == 'Linux' && inputs.mold == 'true'
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y mold
+    - name: Link with mold (Linux)
+      if: runner.os == 'Linux' && inputs.mold == 'true'
+      shell: bash
+      run: echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
 
     # Shared-key variant (ADR-0251 §5): the dev/release/corpus lanes share
     # one rust-cache per profile so the engine+CLI compile is paid once per
@@ -135,7 +148,7 @@ runs:
     # shared key ONLY on a cold miss when cache-save-if-cold-only is set;
     # the first to finish wins, the rest no-op.
     - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      if: inputs.cache-shared-key != ''
+      if: inputs.cache == 'true' && inputs.cache-shared-key != ''
       id: cache-shared
       with:
         shared-key: ${{ inputs.cache-shared-key }}
@@ -144,5 +157,5 @@ runs:
 
     # Plain variant: default content-hash key, default save behavior.
     - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      if: inputs.cache-shared-key == ''
+      if: inputs.cache == 'true' && inputs.cache-shared-key == ''
       id: cache-plain
