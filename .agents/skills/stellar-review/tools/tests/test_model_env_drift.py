@@ -10,13 +10,22 @@ out of the shared Run OpenCode step, whose only override is
 OPENCODE_REVIEW_MODEL. The default model pin the override falls back to
 must match ADR-0302's Decision table in both workflows that carry it.
 
-The same file also pins the reusable workflow's two post-model hardening
+The same file also pins the reusable workflow's three post-model hardening
 guarantees (ADR-0603): the Run OpenCode step's env blanks the
 `GITHUB_ENV`/`GITHUB_PATH` publish channels (a model shell must not
 publish env vars or PATH entries — a BASH_ENV-style payload included —
-into the later, token-bearing steps), and the three restore call sites
+into the later, token-bearing steps), the three restore call sites
 (scripted post, per-kind post, enforce) stage review-restore.sh from the
-PR head SHA's committed copy instead of the model-writable worktree."""
+PR head SHA's committed copy instead of the model-writable worktree,
+and the three token-bearing post steps pin their process-start
+environment at the step env level — BASH_ENV/ENV/LD_PRELOAD/
+LD_LIBRARY_PATH/PYTHONSTARTUP/NODE_OPTIONS pinned to the empty string
+and PATH pinned to the fixed system list review-restore.sh pins —
+because the blanking stops only the model's own file-command writes
+(the runner env file under RUNNER_TEMP stays writable by path), while
+a step env entry, the most specific Actions env scope, overrides
+anything published and holds from process start.
+"""
 
 import glob
 import os
@@ -33,6 +42,7 @@ NIGHTSHIFT = os.path.join(WORKFLOWS, "stellar-nightshift.yml")
 REVIEW_SCRIPTS_TEST = os.path.join(WORKFLOWS, "review-scripts-test.yml")
 SKILL = os.path.join(ROOT, ".agents", "skills", "stellar-review", "SKILL.md")
 ADR_0302 = os.path.join(ROOT, "docs", "adr", "0302-review-model-env-override.md")
+RESTORE_HELPER = os.path.join(ROOT, ".github", "scripts", "review-restore.sh")
 
 # Never re-typed: the four pass-tier names are exactly the ones the
 # generator reads (pass_models.pass_model_env()), plus the run-level
@@ -69,6 +79,29 @@ CALLERS = tuple(
         for path in glob.glob(os.path.join(ROOT, REVIEW_GLOB))
         if path != REUSABLE
     )
+)
+
+# The process-start channels every token-bearing post step pins to the
+# empty string: the shell startup files (BASH_ENV — bash's non-interactive
+# startup file; ENV — the POSIX sh counterpart), the ELF dynamic loader's
+# process-start channels (LD_PRELOAD, LD_LIBRARY_PATH — ld.so(8)), and the
+# interpreter startup surfaces (PYTHONSTARTUP — python's startup file,
+# NODE_OPTIONS — node's per-process flags). PATH is pinned separately, to
+# the fixed system list review-restore.sh pins.
+PINNED_STARTUP_VARS = (
+    "BASH_ENV",
+    "ENV",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "PYTHONSTARTUP",
+    "NODE_OPTIONS",
+)
+
+# The token-bearing post-model steps the process-start pinning applies to.
+POST_STEP_NAMES = (
+    "Post review (scripted)",
+    "Post review (${{ inputs.job_name }})",
+    "Enforce verdict",
 )
 
 
@@ -125,6 +158,22 @@ def pass_model_step():
         r"^ *- name: ",
         REUSABLE,
     )
+
+
+def post_step(name):
+    """The reusable workflow's post-model step with this exact name."""
+    return region_between(
+        read(REUSABLE), r"^ *- name: " + re.escape(name), r"^ *- name: ", REUSABLE
+    )
+
+
+def restore_pinned_path():
+    """The fixed system PATH review-restore.sh pins — the one spelling
+    the workflow's step-level PATH pins must match."""
+    m = re.search(r"(?m)^export PATH=(\S+)$", read(RESTORE_HELPER))
+    if m is None:
+        raise AssertionError(f"{RESTORE_HELPER}: no `export PATH=` pin found")
+    return m.group(1)
 
 
 def model_tiers_rule():
@@ -220,6 +269,39 @@ class TestModelEnvDrift(unittest.TestCase):
             f"{REUSABLE}: each restore call site must pass the event "
             "payload's merge SHA as RESTORE_SHA — the trusted reset target",
         )
+
+    def test_post_steps_pin_process_start_env(self):
+        # The blanked GITHUB_ENV/GITHUB_PATH stop the model's own
+        # file-command writes, but the runner's env file for each later
+        # step is still writable by path under RUNNER_TEMP — and the
+        # restore script's PATH pin only lands once the run block is
+        # already executing, after bash/loader startup consumed
+        # BASH_ENV/LD_PRELOAD/…. A step env entry is the most specific
+        # Actions env scope (workflow syntax, jobs.<job_id>.steps.env:
+        # an env variable defined in a step "will override job and
+        # workflow environment variables with the same name, while the
+        # step executes"), so pinning there overrides anything the model
+        # published — from process start, with fixed literals only.
+        path = restore_pinned_path()
+        for name in POST_STEP_NAMES:
+            step = post_step(name)
+            for var in PINNED_STARTUP_VARS:
+                with self.subTest(step=name, var=var):
+                    self.assertEqual(
+                        env_value(step, var),
+                        "''",
+                        f"{REUSABLE}: the '{name}' step must pin {var} to "
+                        "the empty string — a model-published process-start "
+                        "channel must be inert from process start",
+                    )
+            with self.subTest(step=name, var="PATH"):
+                self.assertEqual(
+                    env_value(step, "PATH"),
+                    path,
+                    f"{REUSABLE}: the '{name}' step must pin PATH to the "
+                    "fixed system list review-restore.sh pins — the "
+                    "workflow-fixed value, never model-published content",
+                )
 
     def test_pass_model_step_env_forwards_every_pass(self):
         step = pass_model_step()

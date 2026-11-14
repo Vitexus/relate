@@ -13,6 +13,19 @@ name: OpenCode Review — Reusable
 # scripted in post steps that restore the workspace first — sourcing
 # the restore choreography from the PR head's committed copy, never the
 # model-writable worktree (ADR-0603).
+#
+# The blanking stops the model's own file-command writes, not every
+# publication channel: the runner's env file for a later step lives
+# under RUNNER_TEMP at a path a model shell can write directly. Each
+# token-bearing post step therefore pins its process-start environment
+# in its step env block — BASH_ENV, ENV, LD_PRELOAD, LD_LIBRARY_PATH,
+# PYTHONSTARTUP and NODE_OPTIONS pinned to the empty string, PATH to
+# the fixed system list review-restore.sh also pins. A step env entry
+# is the most specific Actions env scope and so overrides anything
+# published into the job (workflow-syntax docs,
+# jobs.<job_id>.steps.env), and the runner applies it before the
+# step's first process starts — where the restore script's in-script
+# PATH pin is already too late for shell/loader startup.
 
 on:
   workflow_call:
@@ -304,6 +317,19 @@ jobs:
           # from — never local HEAD, which the model step could have
           # moved with a commit.
           RESTORE_SHA: ${{ github.sha }}
+          # Process-start pinning (see the header note): these fixed
+          # literals are the most specific Actions env scope, so they
+          # override anything the model shell published into the job —
+          # and they hold from process start, where review-restore.sh's
+          # in-script PATH pin (kept as defense-in-depth) is already
+          # too late for shell/loader startup.
+          BASH_ENV: ''
+          ENV: ''
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          PYTHONSTARTUP: ''
+          NODE_OPTIONS: ''
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree
           # copy is model-writable, so the committed PR-head copy — git
@@ -394,6 +420,19 @@ jobs:
           # from — never local HEAD, which the model step could have
           # moved with a commit.
           RESTORE_SHA: ${{ github.sha }}
+          # Process-start pinning (see the header note): these fixed
+          # literals are the most specific Actions env scope, so they
+          # override anything the model shell published into the job —
+          # and they hold from process start, where review-restore.sh's
+          # in-script PATH pin (kept as defense-in-depth) is already
+          # too late for shell/loader startup.
+          BASH_ENV: ''
+          ENV: ''
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          PYTHONSTARTUP: ''
+          NODE_OPTIONS: ''
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree
           # copy is model-writable, so the committed PR-head copy — git
@@ -455,6 +494,19 @@ jobs:
           # from — never local HEAD, which the model step could have
           # moved with a commit.
           RESTORE_SHA: ${{ github.sha }}
+          # Process-start pinning (see the header note): these fixed
+          # literals are the most specific Actions env scope, so they
+          # override anything the model shell published into the job —
+          # and they hold from process start, where review-restore.sh's
+          # in-script PATH pin (kept as defense-in-depth) is already
+          # too late for shell/loader startup.
+          BASH_ENV: ''
+          ENV: ''
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          PYTHONSTARTUP: ''
+          NODE_OPTIONS: ''
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree
           # copy is model-writable, so the committed PR-head copy — git
