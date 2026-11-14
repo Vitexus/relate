@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -558,5 +559,23 @@ func TestPrintReportWritesToInjectedStream(t *testing.T) {
 	PrintFraud(r, "report.json", &out)
 	if got := out.String(); !strings.Contains(got, "wrote report.json (3 measured ops, 1 workers") {
 		t.Fatalf("renderer output: %s", got)
+	}
+}
+
+// LABS-1664: reporting_path's destination is always the org root, and the
+// root is itself an ordinary user — a source that equals it plans a
+// same-node shortestPath, which the engine correctly rejects with 51N23.
+// Pin that no planned op ever does.
+func TestReportingPathNeverPlansTheRootAsItsSource(t *testing.T) {
+	graph := generateIdentity(42, 0.05, 4, 12)
+	work := newIdentityWork(graph, DefaultIdentity())
+	if !slices.Contains(work.ordinaryUsers, rootUserID) {
+		t.Fatal("user-0 must be in the ordinary pool for this pin to mean anything")
+	}
+	for range 2000 {
+		op := planReportingPath(work).(stmtOp)
+		if op.params["from"] == op.params["to"] {
+			t.Fatalf("reporting_path planned a self-path: %v", op.params)
+		}
 	}
 }
