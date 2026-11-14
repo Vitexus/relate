@@ -50,7 +50,7 @@ public struct Record: Sendable, Hashable, RandomAccessCollection {
     /// The record as a column-name → value dictionary: the form
     /// `QueryResult.records` returned before it returned `Record`s.
     public var dictionary: [String: CypherValue] {
-        Dictionary(zip(index.names, values), uniquingKeysWith: { _, last in last })
+        index.positions.mapValues { values[$0] }
     }
 
     /// The named column's value as a Swift type. Throws
@@ -61,9 +61,12 @@ public struct Record: Sendable, Hashable, RandomAccessCollection {
         _ column: String, as type: T.Type = T.self
     ) throws(RelateError) -> T {
         guard let position = index.positions[column] else {
+            // The names are the engine's: each is quoted and bounded as an
+            // echoed value, and the list as an echoed payload.
+            let columns = safeWire(index.names.map(quotedWire).joined(separator: ", "))
             throw shapeMismatch(
                 path: [column], expected: "a column named \(quotedWire(column))",
-                found: "columns \(index.names)")
+                found: "columns \(columns)")
         }
         return try convert(values[position], under: column)
     }

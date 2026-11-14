@@ -3,6 +3,11 @@ import Testing
 
 @testable import Relate
 
+/// A raw-value type whose conversion echoes the raw value it was offered.
+private enum HostileRawValue: String, CypherValueConvertible {
+    case calm
+}
+
 @Suite struct MetadataTests {
     let conn = try! Database.inMemory().connect()
 
@@ -113,6 +118,21 @@ import Testing
             Issue.record("hostile namespace decoded")
         } catch {
             assertSanitized(error.message)
+        }
+        // A result mismatch names a column, a map key and sometimes the
+        // value itself, all of which come from the engine's result.
+        let record = Record(
+            index: ColumnIndex([hostile]), values: [.map([hostile: .string(hostile)])])
+        let mismatches = [
+            try resultMismatch { _ = try record.get(hostile, as: [String: Int].self) },
+            try resultMismatch { _ = try record.get("absent", as: Int.self) },
+            try resultMismatch { _ = try HostileRawValue(cypherValue: .string(hostile)) },
+        ]
+        #expect(mismatches[0].path == [hostile, hostile] && mismatches[2].reason?.contains(hostile) == true)
+        for mismatch in mismatches {
+            assertSanitized(mismatch.message)
+            #expect(mismatch.message.contains("\\u000d\\u000a"))
+            #expect(RelateError.unexpectedResult(mismatch).message == mismatch.message)
         }
         let jsonHostile = "INFO\\r\\nFAKE\\u2028\\u0000"
         do {

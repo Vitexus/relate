@@ -38,23 +38,31 @@ func losingCommitError() throws -> RelateError {
     return try #require(throws: RelateError.self) { try loser.commit() }
 }
 
+/// What `payload` reads out of the `RelateError` that `body` must throw.
+/// `body` not throwing, or throwing a case `payload` does not read (it is
+/// named `expected` in the failure), fails the test.
+private func thrownPayload<Payload>(
+    expected: String, _ body: () throws -> Void, _ payload: (RelateError) -> Payload?
+) throws -> Payload {
+    let error = try #require(throws: RelateError.self) { try body() }
+    guard let found = payload(error) else {
+        Issue.record("expected \(expected), got \(error)")
+        throw error
+    }
+    return found
+}
+
 /// The message of the `invalidParameter` that `body` must throw: any other
 /// outcome fails the test.
 func invalidParameterMessage(_ body: () throws -> Void) throws -> String {
-    let error = try #require(throws: RelateError.self) { try body() }
-    guard case .invalidParameter(let message) = error else {
-        Issue.record("expected invalidParameter, got \(error)")
-        throw error
+    try thrownPayload(expected: "invalidParameter", body) {
+        if case .invalidParameter(let message) = $0 { message } else { nil }
     }
-    return message
 }
 
 /// The mismatch `body` must throw: any other outcome fails the test.
 func resultMismatch(_ body: () throws -> Void) throws -> ResultMismatch {
-    let error = try #require(throws: RelateError.self) { try body() }
-    guard case .unexpectedResult(let mismatch) = error else {
-        Issue.record("expected unexpectedResult, got \(error)")
-        throw error
+    try thrownPayload(expected: "unexpectedResult", body) {
+        if case .unexpectedResult(let mismatch) = $0 { mismatch } else { nil }
     }
-    return mismatch
 }

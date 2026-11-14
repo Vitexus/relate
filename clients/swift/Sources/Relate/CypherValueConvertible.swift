@@ -1,8 +1,8 @@
 // MARK: - Swift values as Cypher values, both ways
 
 /// A Swift type that converts to and from a ``CypherValue``: what a
-/// parameter dictionary, an interpolated statement and a ``Record`` accessor
-/// accept in place of a hand-built enum case.
+/// parameter dictionary and a ``Record`` accessor accept in place of a
+/// hand-built enum case.
 ///
 /// Conversion from a `CypherValue` is strict. An integer widens to a
 /// floating-point type; nothing else converts — a string is never parsed
@@ -24,6 +24,17 @@ public protocol CypherValueConvertible {
 func mismatch<T>(_ type: T.Type, _ value: CypherValue, reason: String? = nil) -> RelateError {
     .unexpectedResult(
         ResultMismatch(path: [], expected: "\(type)", found: value.kind.name, reason: reason))
+}
+
+/// The payload `accessor` reads out of `value`, or the mismatch for `type`
+/// when the value is of another kind. Every conversion reads its payload
+/// through here, so which case holds which payload is stated only by the
+/// accessors (CypherValue+Accessors.swift).
+func payload<T, Payload>(
+    _ accessor: KeyPath<CypherValue, Payload?>, of value: CypherValue, as type: T.Type
+) throws(RelateError) -> Payload {
+    guard let payload = value[keyPath: accessor] else { throw mismatch(type, value) }
+    return payload
 }
 
 /// The one mismatch a result of the wrong shape reports: a missing column,
@@ -52,16 +63,14 @@ extension CypherValue: CypherValueConvertible {
 extension Bool: CypherValueConvertible {
     public func cypherValue() -> CypherValue { .bool(self) }
     public init(cypherValue: CypherValue) throws(RelateError) {
-        guard case .bool(let value) = cypherValue else { throw mismatch(Bool.self, cypherValue) }
-        self = value
+        self = try payload(\.boolValue, of: cypherValue, as: Bool.self)
     }
 }
 
 extension String: CypherValueConvertible {
     public func cypherValue() -> CypherValue { .string(self) }
     public init(cypherValue: CypherValue) throws(RelateError) {
-        guard case .string(let value) = cypherValue else { throw mismatch(String.self, cypherValue) }
-        self = value
+        self = try payload(\.stringValue, of: cypherValue, as: String.self)
     }
 }
 
@@ -85,7 +94,7 @@ extension CypherValueConvertible where Self: FixedWidthInteger {
     }
 
     public init(cypherValue: CypherValue) throws(RelateError) {
-        guard case .int(let value) = cypherValue else { throw mismatch(Self.self, cypherValue) }
+        let value = try payload(\.intValue, of: cypherValue, as: Self.self)
         guard let narrowed = Self(exactly: value) else {
             throw mismatch(Self.self, cypherValue, reason: "\(value) is out of range")
         }
@@ -108,8 +117,7 @@ extension Double: CypherValueConvertible {
     public func cypherValue() -> CypherValue { .float(self) }
     /// A `.float`, or an `.int` widened.
     public init(cypherValue: CypherValue) throws(RelateError) {
-        guard let value = cypherValue.doubleValue else { throw mismatch(Double.self, cypherValue) }
-        self = value
+        self = try payload(\.doubleValue, of: cypherValue, as: Double.self)
     }
 }
 
@@ -117,8 +125,7 @@ extension Float: CypherValueConvertible {
     public func cypherValue() -> CypherValue { .float(Double(self)) }
     /// A `.float` narrowed to the nearest `Float`, or an `.int` widened.
     public init(cypherValue: CypherValue) throws(RelateError) {
-        guard let value = cypherValue.doubleValue else { throw mismatch(Float.self, cypherValue) }
-        self = Float(value)
+        self = Float(try payload(\.doubleValue, of: cypherValue, as: Float.self))
     }
 }
 
@@ -130,11 +137,7 @@ extension Optional: CypherValueConvertible where Wrapped: CypherValueConvertible
     }
 
     public init(cypherValue: CypherValue) throws(RelateError) {
-        if case .null = cypherValue {
-            self = .none
-        } else {
-            self = .some(try Wrapped(cypherValue: cypherValue))
-        }
+        self = cypherValue.isNull ? .none : .some(try Wrapped(cypherValue: cypherValue))
     }
 }
 
@@ -151,11 +154,13 @@ extension Array: CypherValueConvertible where Element: CypherValueConvertible {
     /// A `.list`, or a `.vector` read as the list of its coordinates.
     public init(cypherValue: CypherValue) throws(RelateError) {
         let items: [CypherValue]
-        switch cypherValue {
-        case .list(let values): items = values
-        case .vector(.floats(_, let values)): items = values.map(CypherValue.float)
-        case .vector(.ints(_, let values)): items = values.map(CypherValue.int)
-        default: throw mismatch([Element].self, cypherValue)
+        if let values = cypherValue.listValue {
+            items = values
+        } else {
+            switch try payload(\.vectorValue, of: cypherValue, as: [Element].self) {
+            case .floats(_, let values): items = values.map(CypherValue.float)
+            case .ints(_, let values): items = values.map(CypherValue.int)
+            }
         }
         var elements: [Element] = []
         elements.reserveCapacity(items.count)
@@ -177,9 +182,7 @@ extension Dictionary: CypherValueConvertible where Key == String, Value: CypherV
 
     /// A `.map` (a node or relationship is not one; read its `properties`).
     public init(cypherValue: CypherValue) throws(RelateError) {
-        guard case .map(let entries) = cypherValue else {
-            throw mismatch([String: Value].self, cypherValue)
-        }
+        let entries = try payload(\.mapValue, of: cypherValue, as: [String: Value].self)
         var result: [String: Value] = [:]
         result.reserveCapacity(entries.count)
         for (key, value) in entries {
@@ -219,10 +222,7 @@ extension CypherPayload {
     public func cypherValue() -> CypherValue { Self.payloadCase.wrap(self) }
 
     public init(cypherValue: CypherValue) throws(RelateError) {
-        guard let payload = cypherValue[keyPath: Self.payloadCase.extract] else {
-            throw mismatch(Self.self, cypherValue)
-        }
-        self = payload
+        self = try payload(Self.payloadCase.extract, of: cypherValue, as: Self.self)
     }
 }
 

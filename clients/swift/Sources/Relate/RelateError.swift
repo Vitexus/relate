@@ -101,9 +101,14 @@ public struct ResultMismatch: Sendable, Hashable {
         self.reason = reason
     }
 
+    /// The mismatch as one line of text. A column name, a map key and a
+    /// reason can echo strings that came from the engine's result, so each
+    /// is sanitized here as every echoed wire value is (non-printable
+    /// characters escaped, the length bounded); ``path`` and ``reason``
+    /// themselves hold the strings as they are.
     public var message: String {
-        let place = path.isEmpty ? "" : path.joined(separator: ".") + ": "
-        let why = reason.map { " (\($0))" } ?? ""
+        let place = path.isEmpty ? "" : path.map(safeWire).joined(separator: ".") + ": "
+        let why = reason.map { " (\(safeWire($0)))" } ?? ""
         return "\(place)expected \(expected), found \(found)\(why)"
     }
 }
@@ -118,7 +123,7 @@ public enum RelateError: LocalizedError, Sendable, Equatable, CustomStringConver
     /// The C ABI returned a payload that violates its documented contract.
     case decoding(String)
     /// A result did not have the shape or type the caller asked for: a
-    /// typed record accessor, `single()`, or a `Decodable` decode.
+    /// typed record accessor, `single()` or `scalar()`.
     case unexpectedResult(ResultMismatch)
 
     public var message: String {

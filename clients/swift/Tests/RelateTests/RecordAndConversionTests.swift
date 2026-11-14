@@ -42,6 +42,11 @@ enum Shelf: String, CypherValueConvertible { case want, reading, read }
         #expect(try record.get("url", as: URL.self) == url)
         #expect(try record.get("shelf", as: Shelf.self) == .reading)
         #expect(try record.get("bytes", as: Data.self) == Data([0, 127, 255]))
+        // A value that is not a list is not Data; a list element that is not
+        // a byte is named by its position.
+        #expect(try resultMismatch { _ = try record.get("url", as: Data.self) }.expected == "Data")
+        let notBytes = try resultMismatch { _ = try Data(cypherValue: .list([.int(1), .int(256)])) }
+        #expect(notBytes.path == ["[1]"] && notBytes.reason == "256 is out of range")
     }
 
     @Test func literalAndTypedDictionariesStillBind() throws {
@@ -63,9 +68,9 @@ enum Shelf: String, CypherValueConvertible { case want, reading, read }
         let message = try invalidParameterMessage { try conn.query("RETURN $n", ["n": UInt64.max]) }
         #expect(message.contains("UInt64") && message.contains("does not fit"))
         #expect(try conn.query("RETURN $n", ["n": UInt64(Int64.max)]).scalar() == .int(.max))
-        #expect(throws: RelateError.self) {
+        #expect(try invalidParameterMessage {
             try conn.query("RETURN $d", ["d": Date(timeIntervalSinceReferenceDate: .nan)])
-        }
+        }.contains("not finite"))
         let offTheGlobe = CLLocationCoordinate2D(latitude: 95, longitude: 0)
         #expect(try invalidParameterMessage { try conn.query("RETURN $p", ["p": offTheGlobe]) }
             .contains("latitude 95.0"))
