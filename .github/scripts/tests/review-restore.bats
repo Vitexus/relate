@@ -2,13 +2,18 @@
 # restore-and-harden choreography of the opencode review lanes
 # (opencode-review-reusable.yml's two post steps and the Enforce
 # verdict step; ADR-0603). Each choreography element the helper owns
-# is pinned here: PATH pin, hooks neutralization, the reset to the
-# event-payload RESTORE_SHA (never the model-moveable local HEAD), the
-# untracked sweep outside .stellar, findings-file rejection, the
-# timeout marker read, and the --no-clean shape the enforce gate uses.
-# The trusted-source staging the workflow wraps around every sourcing
+# is pinned here: PATH pin, git-configuration neutralization (the
+# GIT_CONFIG_* source pins and the per-invocation fsmonitor/pager
+# overrides), hooks neutralization, the reset to the event-payload
+# RESTORE_SHA (never the model-moveable local HEAD), the untracked
+# sweep outside .stellar, findings-file rejection, the timeout marker
+# read, and the --no-clean shape the enforce gate uses. The
+# trusted-source staging the workflow wraps around every sourcing
 # (git show of the PR head SHA into a fresh mktemp file) is pinned by
-# the tamper fixture at the bottom.
+# the tamper fixture and the round-5 config payloads at the bottom:
+# a model step with shell access can write .git/config, the
+# worktree-scoped config and the shared HOME gitconfig, and every git
+# command the post steps run parses them.
 #
 # Local run:
 #   bats .github/scripts/tests/review-restore.bats
@@ -24,8 +29,9 @@ PINNED_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 setup() {
   TEST_TMP="$(mktemp -d)"
-  # Hermetic HOME/XDG: the choreography's global core.hooksPath write
-  # must land in a throwaway gitconfig, never the developer's.
+  # Hermetic HOME/XDG: the config-payload tests below write a
+  # model-written global gitconfig, and no test may touch the
+  # developer's real one.
   export HOME="${TEST_TMP}/home"
   export XDG_CONFIG_HOME="${TEST_TMP}/xdg"
   mkdir -p "${HOME}" "${XDG_CONFIG_HOME}" "${TEST_TMP}/runner-tmp"
@@ -71,6 +77,58 @@ run_helper() {
     printf "TIMED_OUT=%s\n" "${TIMED_OUT:-unset}"
     printf "PATH=%s\n" "${PATH}"
   ' _ "${REPO}" "${SCRIPT}" "$@"
+}
+
+# A model-written "hook" script and its observable marker: the config
+# payloads below point git's code-execution knobs (fsmonitor, pager,
+# aliases, hooks) at it and assert the marker never appears.
+plant_marker_hook() {
+  EVIL="${TEST_TMP}/model-payload.sh"
+  MARKER="${TEST_TMP}/payload-ran"
+  printf '#!/bin/sh\ntouch "%s"\n' "${MARKER}" > "${EVIL}"
+  chmod +x "${EVIL}"
+}
+
+# The trusted-source fixture: a stand-in runner checkout whose one
+# commit — the event-payload SHA the workflow stages and resets from —
+# carries the real helper at .github/scripts/review-restore.sh. The
+# tamper and config-payload tests below plant model-step output on top
+# of it. Exports PR_HEAD (the stand-in head SHA) and RESTORE_SHA.
+make_helper_repo() {
+  REPO="${TEST_TMP}/repo"
+  mkdir -p "${REPO}/.github/scripts" "${REPO}/.stellar"
+  git -C "${REPO}" init -q
+  git -C "${REPO}" config user.email review-restore@test
+  git -C "${REPO}" config user.name "review-restore test"
+  cp "${SCRIPT}" "${REPO}/.github/scripts/review-restore.sh"
+  echo base > "${REPO}/tracked.txt"
+  printf 'droplet.txt\n.stellar/\n' > "${REPO}/.gitignore"
+  git -C "${REPO}" add .github/scripts/review-restore.sh tracked.txt .gitignore
+  git -C "${REPO}" commit -qm base
+  PR_HEAD="$(git -C "${REPO}" rev-parse HEAD)"
+  RESTORE_SHA="$PR_HEAD"
+  export RESTORE_SHA
+}
+
+# The workflow's trusted-source path (opencode-review-reusable.yml's
+# post steps): stage the committed PR-head copy of the helper with the
+# pinned git invocation, verify the staged bytes are the trusted
+# commit's, then source the staged copy — all inside a stand-in for
+# the post step's shell, so the helper's exported pins land there.
+run_trusted_staging() {
+  run bash -c '
+    cd "$1" || exit 1
+    RESTORE="$(mktemp)"
+    git -c core.fsmonitor= -c core.pager=cat show "$2:.github/scripts/review-restore.sh" > "$RESTORE"
+    if cmp -s "$RESTORE" "$3"; then
+      printf "STAGED_TRUSTED=yes\n"
+    else
+      printf "STAGED_TRUSTED=no\n"
+    fi
+    . "$RESTORE" "${@:4}"
+    printf "TIMED_OUT=%s\n" "${TIMED_OUT:-unset}"
+    printf "PATH=%s\n" "${PATH}"
+  ' _ "${REPO}" "${PR_HEAD}" "${SCRIPT}" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -219,19 +277,7 @@ run_helper() {
   # rewritten the worktree copy. The workflow path stages the
   # committed copy via git show into a fresh mktemp file and sources
   # that — the worktree copy is never consulted.
-  REPO="${TEST_TMP}/repo"
-  mkdir -p "${REPO}/.github/scripts" "${REPO}/.stellar"
-  git -C "${REPO}" init -q
-  git -C "${REPO}" config user.email review-restore@test
-  git -C "${REPO}" config user.name "review-restore test"
-  cp "${SCRIPT}" "${REPO}/.github/scripts/review-restore.sh"
-  echo base > "${REPO}/tracked.txt"
-  printf 'droplet.txt\n.stellar/\n' > "${REPO}/.gitignore"
-  git -C "${REPO}" add .github/scripts/review-restore.sh tracked.txt .gitignore
-  git -C "${REPO}" commit -qm base
-  PR_HEAD="$(git -C "${REPO}" rev-parse HEAD)"
-  RESTORE_SHA="$PR_HEAD"
-  export RESTORE_SHA
+  make_helper_repo
   # the model step rewrites the worktree copy of the helper (and the
   # tracked file, to prove the real choreography really ran) — the
   # tamper is maximally observable: a stderr banner, a marker file, a
@@ -244,14 +290,7 @@ run_helper() {
   } > "${REPO}/.github/scripts/review-restore.sh"
   echo tampered > "${REPO}/tracked.txt"
   # the workflow's path: stage the committed PR-head copy, source it
-  run bash -c '
-    cd "$1" || exit 1
-    RESTORE="$(mktemp)"
-    git show "$2:.github/scripts/review-restore.sh" > "$RESTORE"
-    . "$RESTORE" "${@:3}"
-    printf "TIMED_OUT=%s\n" "${TIMED_OUT:-unset}"
-    printf "PATH=%s\n" "${PATH}"
-  ' _ "${REPO}" "${PR_HEAD}" .stellar/findings.json
+  run_trusted_staging .stellar/findings.json
   [ "$status" -eq 0 ]
   # the trusted copy ran: the reset restored the reviewed tree, the
   # PATH pin and the timeout-marker read reached the sourcing shell
@@ -262,6 +301,87 @@ run_helper() {
   [[ "$output" != *"TAMPER_RAN"* ]]
   [ ! -e "${REPO}/.tamper-ran" ]
   cmp -s "${SCRIPT}" "${REPO}/.github/scripts/review-restore.sh"
+}
+
+# ---------------------------------------------------------------------------
+# Model-written git configuration (the round-5 finding and the round-4
+# model experiments: the model step can write .git/config with
+# core.fsmonitor and aliases, and the shared HOME gitconfig — and
+# every git command the post steps run parses that config)
+# ---------------------------------------------------------------------------
+
+@test "a model-written .git/config core.fsmonitor executes nothing — the restore's git calls pin fsmonitor and pager off per invocation" {
+  make_helper_repo
+  plant_marker_hook
+  # the round-5 payload: core.fsmonitor (and a pager) in .git/config
+  # pointing at a marker script — without the per-invocation -c
+  # overrides, every index-refreshing git command in the restore
+  # (reset --hard, clean, ls-files) runs the model's fsmonitor hook
+  # with the write token
+  git -C "${REPO}" config core.fsmonitor "${EVIL}"
+  git -C "${REPO}" config core.pager "${EVIL}"
+  echo tampered > "${REPO}/tracked.txt"
+  run_trusted_staging .stellar/findings.json
+  [ "$status" -eq 0 ]
+  # no model-written fsmonitor or pager ever executed
+  [ ! -e "${MARKER}" ]
+  # the restore itself still ran: tracked content back to the trusted base
+  [ "$(cat "${REPO}/tracked.txt")" = "base" ]
+  # the staged helper is the trusted commit's bytes, not a steered read
+  [[ "$output" == *"STAGED_TRUSTED=yes"* ]]
+}
+
+@test "a model-written global gitconfig (the shared HOME) is ignored, not obeyed or edited — GIT_CONFIG_GLOBAL pins it to /dev/null" {
+  make_helper_repo
+  plant_marker_hook
+  # the round-4 experiment payload: the model shell wrote the shared
+  # HOME gitconfig — fsmonitor, a pager and a hooks dir of its own
+  mkdir -p "${TEST_TMP}/model-githooks"
+  printf '#!/bin/sh\ntouch "%s"\n' "${MARKER}" > "${TEST_TMP}/model-githooks/post-checkout"
+  chmod +x "${TEST_TMP}/model-githooks/post-checkout"
+  {
+    echo "[core]"
+    echo "	fsmonitor = ${EVIL}"
+    echo "	pager = ${EVIL}"
+    echo "	hooksPath = ${TEST_TMP}/model-githooks"
+  } > "${HOME}/.gitconfig"
+  echo tampered > "${REPO}/tracked.txt"
+  run_trusted_staging .stellar/findings.json
+  [ "$status" -eq 0 ]
+  # no model-written global fsmonitor, pager or hook ever executed
+  [ ! -e "${MARKER}" ]
+  [ "$(cat "${REPO}/tracked.txt")" = "base" ]
+  [[ "$output" == *"STAGED_TRUSTED=yes"* ]]
+  # the model-written global gitconfig is untouched — ignored under
+  # the GIT_CONFIG_GLOBAL pin, never rewritten
+  grep -q "hooksPath = ${TEST_TMP}/model-githooks" "${HOME}/.gitconfig"
+}
+
+@test "a planted object-store alias attempt stays inert — builtins win, the trusted SHA still resolves to the trusted bytes" {
+  make_helper_repo
+  plant_marker_hook
+  # the model step's redirect attempts on the object-store read the
+  # post steps stage from: config aliases shadowing the four git
+  # commands of the restore path, and an alternates entry aliasing a
+  # model-controlled directory into the object store
+  git -C "${REPO}" config alias.show "!${EVIL}"
+  git -C "${REPO}" config alias.reset "!${EVIL}"
+  git -C "${REPO}" config alias.clean "!${EVIL}"
+  git -C "${REPO}" config alias.ls-files "!${EVIL}"
+  mkdir -p "${TEST_TMP}/model-objects" "${REPO}/.git/objects/info"
+  echo "${TEST_TMP}/model-objects" > "${REPO}/.git/objects/info/alternates"
+  echo tampered > "${REPO}/tracked.txt"
+  run_trusted_staging .stellar/findings.json
+  [ "$status" -eq 0 ]
+  # no alias ever executed: git builtins take precedence over alias
+  # definitions, so the planted names never run
+  [ ! -e "${MARKER}" ]
+  [ "$(cat "${REPO}/tracked.txt")" = "base" ]
+  # the staged helper came from the real git show builtin reading the
+  # event-payload SHA — the trusted-commit bytes, not an alias's
+  # output; an object-store write the model can perform cannot
+  # redirect a full-SHA object read
+  [[ "$output" == *"STAGED_TRUSTED=yes"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -294,12 +414,19 @@ run_helper() {
   [[ "$output" == *"PATH=${PINNED_PATH}"* ]]
 }
 
-@test "hooks are neutralized: local core.hooksPath unset, global pointed at /dev/null" {
+@test "hooks are neutralized: local core.hooksPath unset, the global config pinned away" {
   make_repo
+  # the model step planted a local hooks path AND wrote a global
+  # gitconfig naming its own hooks dir
   git -C "${REPO}" config core.hooksPath .githooks
+  mkdir -p "${TEST_TMP}/model-githooks"
+  printf '#!/bin/sh\nexit 0\n' > "${TEST_TMP}/model-githooks/post-checkout"
+  git config --global core.hooksPath "${TEST_TMP}/model-githooks"
   run_helper .stellar/findings.json
   [ "$status" -eq 0 ]
   # local core.hooksPath unset: --get must find nothing
   ! git -C "${REPO}" config --get core.hooksPath >/dev/null 2>&1
-  grep -q "hooksPath = /dev/null" "${HOME}/.gitconfig"
+  # the model-written global gitconfig is untouched — ignored under
+  # the GIT_CONFIG_GLOBAL pin, never rewritten
+  grep -q "hooksPath = ${TEST_TMP}/model-githooks" "${HOME}/.gitconfig"
 }
