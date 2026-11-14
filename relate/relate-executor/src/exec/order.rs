@@ -6,7 +6,7 @@
 //! not a section of it).
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 
 use relate_core::{Error, Result, Value};
 use relate_ir::{Expr, Projection};
@@ -431,6 +431,15 @@ pub(crate) fn sort_rows_by_parked_keys(
     }
 }
 
+/// The ordered window's capacity — `skip + limit` entries — or `None` when
+/// there is no `LIMIT` (a `SKIP`-only window is unbounded) or the sum
+/// overflows (an overflowing window is unlimited). The one derivation of a
+/// window's size: the clause's [`window_keep`] masks it for the shapes that
+/// take no window, and every consumer reads the answer.
+pub(crate) fn window_capacity(skip_n: usize, limit_n: Option<usize>) -> Option<usize> {
+    limit_n.and_then(|limit_n| skip_n.checked_add(limit_n))
+}
+
 /// The full sort behind [`sort_rows_by_parked_keys`]'s unsorted case.
 fn sort_all_rows(keys: &OrderKeys<'_>, rows: &mut [Row]) -> Result<()> {
     let _rows = hold_sort_rows(rows)?;
@@ -473,6 +482,136 @@ fn take_parked_top_k(keys: &OrderKeys<'_>, rows: Vec<Row>, keep: usize) -> Resul
     drop(keys_charge);
     drop(rows_charge);
     Ok(keyed.into_iter().map(|(_, _, row)| row).collect())
+}
+
+/// One entry of a [`TopKWindow`]: the parked keys beside the row they sort,
+/// with the arrival sequence that keeps the selection stable.
+///
+/// `Ord` is the sort's own comparator ([`cmp_sort_keys`] over the parked
+/// keys, the sequence as the tiebreak): better sorts *smaller*, so a
+/// `BinaryHeap`'s root is the entry the next better row evicts.
+struct TopKEntry<'k> {
+    keys: &'k OrderKeys<'k>,
+    parked: Vec<Value>,
+    seq: usize,
+    row: Row,
+    /// The entry's landing figure, taken once at construction (the row
+    /// solely owned its payloads then) and refunded verbatim on eviction —
+    /// re-measuring at eviction would read the shared key payloads as zero.
+    bytes: u64,
+}
+
+impl PartialEq for TopKEntry<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == CmpOrdering::Equal
+    }
+}
+
+impl Eq for TopKEntry<'_> {}
+
+impl PartialOrd for TopKEntry<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TopKEntry<'_> {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        cmp_sort_keys(self.keys, &self.parked, self.seq, &other.parked, other.seq)
+    }
+}
+
+/// The bounded form of an ordered window (ADR-0555 §3: "a top-k heap for
+/// ordered limits") — the container an `ORDER BY ... LIMIT` (plus its
+/// `SKIP`) folds its producer into, row by row, instead of collecting the
+/// projection's every output row first. At most `keep` entries are ever
+/// held: past capacity the newcomer replaces the worst entry only when it
+/// sorts before it, and is dropped otherwise.
+///
+/// The window is the retaining container and charges what it holds
+/// (ADR-0463): each entry's row and key columns are added on insert and
+/// subtracted on eviction, so the running charge is the live window, never
+/// the input. The projection's per-row charge ([`plain_rows`]'s
+/// `retain_bytes`) does not exist on this path — the window is that
+/// charge's bounded replacement.
+pub(crate) struct TopKWindow<'k> {
+    keys: &'k OrderKeys<'k>,
+    keep: usize,
+    seq: usize,
+    /// Worst entry at the root — the one the next better row evicts.
+    heap: BinaryHeap<TopKEntry<'k>>,
+    /// The live window's reserved bytes — the one source of its size, read
+    /// back through [`relate_core::tokens::WorkspaceCharge::bytes`].
+    charge: relate_core::tokens::WorkspaceCharge,
+}
+
+impl<'k> TopKWindow<'k> {
+    /// `keep` entries at most; `0` keeps none (a `LIMIT 0` window every row
+    /// falls out of). The charge starts empty and tracks the live window —
+    /// no reservation to make yet, so the construction cannot fail.
+    pub(crate) fn new(keys: &'k OrderKeys<'k>, keep: usize) -> Self {
+        Self {
+            keys,
+            keep,
+            seq: 0,
+            heap: BinaryHeap::new(),
+            charge: relate_core::tokens::WorkspaceCharge::empty(),
+        }
+    }
+
+    /// Offer one projected row (its keys already parked). The entry is
+    /// inserted, then the window is cut back to `keep` — one path, so a
+    /// window that is not yet full and one that evicts are the same code.
+    pub(crate) fn push(&mut self, row: Row) -> Result<()> {
+        if self.keep == 0 {
+            return Ok(());
+        }
+        // The landing figure is taken while the row still solely owns its
+        // payloads: the key clone below shares each parked payload with the
+        // row's own `__ord*` column, and the ownership-aware walk counts a
+        // payload only where one holder owns it — measured afterwards, the
+        // key payloads would count zero times and the workspace cap would
+        // not cover them.
+        let bytes = entry_bytes(&row);
+        let entry = TopKEntry {
+            keys: self.keys,
+            parked: parked_keys(self.keys, &row),
+            seq: self.seq,
+            row,
+            bytes,
+        };
+        self.seq += 1;
+        self.heap.push(entry);
+        let live = self.charge.bytes() + bytes;
+        let live = if self.heap.len() > self.keep {
+            let evicted = self.heap.pop().expect("the window is over capacity");
+            live - evicted.bytes
+        } else {
+            live
+        };
+        self.charge.resize(live)
+    }
+
+    /// The held rows, best first — at most `keep`, already in the sort's
+    /// order, so the finish tail sorts nothing on this shape. The window's
+    /// charge is released with it; the rows are the caller's.
+    pub(crate) fn finish(self) -> Vec<Row> {
+        self.heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|entry| entry.row)
+            .collect()
+    }
+}
+
+/// One entry's landing figure: the row's retained payloads and its buffer
+/// slots — [`RetainedTotal::add_row`]'s spelling, the figure the
+/// projection's `Vec` container prices a row by, so both containers charge
+/// a row identically — plus the parked key columns' slots.
+fn entry_bytes(row: &Row) -> u64 {
+    let values = row.values();
+    crate::workspace::row_retained_heap(values)
+        + crate::workspace::retained_rows_bytes(1, values.len())
 }
 
 /// The paging stage: drop the first `skip_n` rows, keep at most `limit_n`.

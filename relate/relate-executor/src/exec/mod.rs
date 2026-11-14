@@ -82,6 +82,7 @@ pub(crate) mod ontology;
 pub(crate) mod order;
 pub(crate) mod pattern_policies;
 pub(crate) mod pivot;
+pub(crate) mod post_merge;
 pub(crate) mod predicate_spec;
 pub(crate) mod procedure_rows;
 pub(crate) mod procedures;

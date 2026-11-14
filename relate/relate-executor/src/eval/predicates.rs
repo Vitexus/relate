@@ -42,6 +42,20 @@ pub(crate) fn predicate_holds(
     super::predicate_value_holds(&eval_match_predicate(graph, row, predicate, params)?)
 }
 
+/// Whether a post-merge WHERE holds on one already-projected `row` — the
+/// row-level half of the projection's plain-WHERE policy, read by
+/// [`filter_rows_where`] and by the projection's landing stage, so the one
+/// policy has one spelling whether the rows are filtered in a batch or one
+/// at a time as they land.
+pub(crate) fn where_holds(
+    graph: &ExecGraph<'_>,
+    params: &BTreeMap<String, Value>,
+    row: &Row,
+    predicate: &Expr,
+) -> Result<bool> {
+    super::predicate_value_holds(&eval(graph, row, predicate, params)?)
+}
+
 /// Keep the rows whose bare-evaluated predicate holds — the post-merge
 /// WHERE stage of the projection and of a catalog `YIELD ... WHERE`: a
 /// failing filter expression propagates, a null does not hold, and any
@@ -56,7 +70,7 @@ pub(crate) fn filter_rows_where(
 ) -> Result<Vec<Row>> {
     let mut filtered = Vec::with_capacity(rows.len());
     for row in rows {
-        if super::predicate_value_holds(&eval(graph, &row, predicate, params)?)? {
+        if where_holds(graph, params, &row, predicate)? {
             filtered.push(row);
         }
     }

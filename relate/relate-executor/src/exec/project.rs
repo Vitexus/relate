@@ -8,20 +8,19 @@ use relate_core::{Error, Result, Value};
 use relate_ir::{Clause, Expr, Projection};
 
 use crate::ctx::ExecCtx;
-use crate::distinct_set::DistinctSet;
-use crate::eval::{eval, expr_vars, filter_rows_where, is_agg_expr};
+use crate::eval::{eval, expr_vars, is_agg_expr};
 use crate::overlay::{ExecGraph, MaterializeCache};
-use crate::row::{Row, RowNames};
+use crate::row::Row;
 
 use super::aggregate::{aggregate_ex, Aggregation, GroupSubclauses, WhereMode};
 use super::order::{
-    page, pages_eagerly, park_order_keys, resolve_page_bounds, sort_rows_by_parked_keys,
-    unpark_order_keys, OrderKeys,
+    page, pages_eagerly, park_order_keys, resolve_page_bounds, window_capacity, OrderKeys,
 };
 use super::pattern_policies::MatchFold;
+use super::post_merge::{finish_projection, Landing};
 use super::scope::{
-    has_star_item, is_internal_column, is_star_item, projection_names, result_column,
-    return_columns, star_scope_names, visible_keys, ProjectionFields,
+    has_star_item, is_internal_column, is_star_item, projection_names, return_columns,
+    star_scope_names, visible_keys, ProjectionFields,
 };
 use super::{materialize_rows_strict, QueryResult, RowFeed};
 
@@ -69,81 +68,6 @@ pub(crate) fn return_result(
     Ok(QueryResult::intermediate(columns, data, graph.stats()))
 }
 
-/// The named columns of `row`, cloned in order — the row a multi-column
-/// DISTINCT keys.
-fn row_columns(row: &Row, names: &[String]) -> Vec<Value> {
-    names
-        .iter()
-        .map(|n| result_column(row, n).clone())
-        .collect()
-}
-
-/// The columns a non-`*` DISTINCT keys, borrowed when the projection is
-/// one column wide (a one-element slice: no column clone, no row vector).
-/// The arity-1 *keying* lives in [`DistinctSet::insert_row`] alone; this
-/// is only the borrow.
-fn distinct_columns<'r>(row: &'r Row, names: &[String]) -> std::borrow::Cow<'r, [Value]> {
-    match names {
-        [name] => std::borrow::Cow::Borrowed(std::slice::from_ref(result_column(row, name))),
-        names => std::borrow::Cow::Owned(row_columns(row, names)),
-    }
-}
-
-/// What a merged row's DISTINCT key is: a `*` row keys its visible keys, a
-/// named projection its output columns — decided once, not re-checked per
-/// row.
-enum DistinctKeys<'a> {
-    Visible,
-    Columns(&'a [String]),
-}
-
-impl DistinctKeys<'_> {
-    /// One row's key, borrowed when the projection is one column wide.
-    fn key<'r>(&self, row: &'r Row) -> std::borrow::Cow<'r, [Value]> {
-        match self {
-            DistinctKeys::Visible => std::borrow::Cow::Owned(row_columns(row, &visible_keys(row))),
-            DistinctKeys::Columns(names) => distinct_columns(row, names),
-        }
-    }
-}
-
-/// The post-merge DISTINCT stage: first-seen keep over the merged rows,
-/// keyed by the output columns (a `*` row keys its visible keys). The
-/// returned charge holds the kept row buffer; the caller resizes it as
-/// the paging stage ([`page`]) and the result materialization shrink the
-/// buffer. The set owns its workspace charge and drops (releasing it) at
-/// the end of the pass.
-fn retain_distinct(
-    merged: Vec<Row>,
-    keys: DistinctKeys<'_>,
-) -> Result<(Vec<Row>, relate_core::tokens::WorkspaceCharge)> {
-    let retained_rows = relate_core::tokens::WorkspaceCharge::retain_with(|| {
-        crate::workspace::row_buffer_bytes(&merged)
-    })?;
-    let mut seen = DistinctSet::default();
-    let mut kept = Vec::new();
-    for row in merged {
-        if seen.insert_row(&keys.key(&row))? {
-            kept.push(row);
-        }
-    }
-    drop(seen);
-    Ok((kept, retained_rows))
-}
-
-/// Where a `RETURN`/`WITH` projection's incoming rows come from. The sink's
-/// caller is the only authority for the projected case: a row carries no
-/// marker a user alias could forge, and an ordinary batch whose bindings
-/// happen to bind every output name is still evaluated, not passed through.
-pub(crate) enum RowSource {
-    /// Bindings the projection must evaluate its items against.
-    Bindings,
-    /// The match sink already evaluated this clause's items on every row
-    /// (their columns plus the parked `__ord*` sort keys), so only the
-    /// sort, page, DISTINCT, and column-extraction stages are left.
-    SinkProjected,
-}
-
 /// Field references of a `RETURN`/`WITH` projection clause.
 #[derive(Clone, Copy)]
 pub(crate) struct ProjectSpec<'a> {
@@ -181,7 +105,7 @@ impl<'a> ProjectSpec<'a> {
 /// items, an explicit GROUP BY, or a DISTINCT with an aggregating
 /// subclause).
 #[derive(Clone, Copy)]
-enum ProjectionShape {
+pub(crate) enum ProjectionShape {
     Plain,
     Star,
     Aggregate {
@@ -232,10 +156,27 @@ impl ProjectionShape {
         matches!(self, ProjectionShape::Aggregate { star: false })
     }
 
+    /// Whether the shape folds an aggregation — the fact the ordered
+    /// window's decision reads ([`ProjectionClass::window_keep`]): an
+    /// aggregating shape's group table is its own declared breaker, so it
+    /// takes no top-k window.
+    pub(crate) fn aggregating(&self) -> bool {
+        matches!(self, ProjectionShape::Aggregate { .. })
+    }
+
+    /// Whether the projection consumes a generated feed as rows arrive —
+    /// the shape's own answer ([`Self::streams`]) widened by the ordered
+    /// window, which folds a generated feed into its heap rather than
+    /// collecting what the heap bounds. One decision, read by the
+    /// dispatcher (which chooses the feed) and by [`materialize_feed`].
+    pub(crate) fn folds(&self, window_keep: Option<usize>) -> bool {
+        self.streams() || window_keep.is_some()
+    }
+
     /// Whether the projection carries a `*` item — the shape a `*` owns
     /// outright, or the aggregating form that groups by every carried
     /// variable.
-    fn star(&self) -> bool {
+    pub(crate) fn star(&self) -> bool {
         matches!(
             self,
             ProjectionShape::Star | ProjectionShape::Aggregate { star: true }
@@ -257,24 +198,24 @@ impl ProjectionShape {
 pub(crate) struct ProjectionClass<'a> {
     /// The clause's fields — the one field bundle (a copy of the
     /// [`ProjectionFields`] every consumer reads).
-    fields: ProjectionFields<'a>,
+    pub(crate) fields: ProjectionFields<'a>,
     /// The decided shape: which merge path owns the clause.
-    shape: ProjectionShape,
+    pub(crate) shape: ProjectionShape,
     /// ADR-0453's one WHERE split, decided once in the mode the pipeline
     /// reads: an aggregating path whose WHERE carries aggregate calls
     /// takes it as HAVING (evaluated per group inside the aggregation);
     /// every other WHERE form — any WHERE on a non-aggregating path
     /// included — stays the plain post-merge filter.
-    where_mode: Option<WhereMode<'a>>,
+    pub(crate) where_mode: Option<WhereMode<'a>>,
     /// The eager pre-projection page ([`pages_eagerly`]) on a
     /// non-aggregating shape: `SKIP`/`LIMIT` with no `ORDER BY`,
     /// DISTINCT, or filter.
     eager_paged: bool,
     /// The projection's parked-key plan — the one per-key scope decision
     /// every path below parks its keys with.
-    order_keys: OrderKeys<'a>,
+    pub(crate) order_keys: OrderKeys<'a>,
     /// The projection's output names.
-    out_names: Vec<String>,
+    pub(crate) out_names: Vec<String>,
 }
 
 impl<'a> ProjectionClass<'a> {
@@ -307,6 +248,51 @@ impl<'a> ProjectionClass<'a> {
             where_mode: self.where_mode,
             import_scope: scope,
         }
+    }
+
+    /// The clause's resolved paging bounds, resolved **once** per clause: a
+    /// nondeterministic `LIMIT` bound would otherwise size the ordered
+    /// window differently from the page it feeds. The eager pre-projection
+    /// page has already run by the time the tail reads these, so the tail
+    /// pages on nothing ([`Self::eager_paged`]).
+    pub(crate) fn page_bounds(
+        &self,
+        graph: &ExecGraph<'_>,
+        params: &BTreeMap<String, Value>,
+    ) -> Result<(usize, Option<usize>)> {
+        if self.eager_paged {
+            return Ok((0, None));
+        }
+        resolve_page_bounds(graph, params, self.fields.skip, self.fields.limit)
+    }
+
+    /// The sort's cutoff — `skip + limit`, the most rows an ordered page can
+    /// need ([`window_capacity`]) — or `None` when the sort must keep every
+    /// row: no order keys, no `LIMIT` (a `SKIP`-only window is unbounded),
+    /// a `DISTINCT` pass (its set is the declared breaker and the pass runs
+    /// *after* the sort, so a pre-distinct cut would answer fewer rows than
+    /// the distinct page deserves), or an overflowing sum. The one
+    /// derivation of the cutoff; [`Self::window_keep`] masks it for the
+    /// shape that takes a streaming window, and the finish tail's sort
+    /// reads this value rather than recomputing it.
+    pub(crate) fn sort_cut(&self, bounds: (usize, Option<usize>)) -> Option<usize> {
+        if self.order_keys.is_empty() || self.fields.distinct {
+            return None;
+        }
+        window_capacity(bounds.0, bounds.1)
+    }
+
+    /// The bounded window this clause folds its producer into — its sort
+    /// cutoff, masked for the aggregating shape: a group table is its own
+    /// declared breaker and is already bounded by the group map, so the
+    /// clause keeps its full group sort. The one window decision, beside
+    /// the classification it reads; the merge paths, the feed and the
+    /// finish tail all read its answer.
+    pub(crate) fn window_keep(&self, bounds: (usize, Option<usize>)) -> Option<usize> {
+        if self.shape.aggregating() {
+            return None;
+        }
+        self.sort_cut(bounds)
     }
 }
 
@@ -404,7 +390,7 @@ pub(crate) fn open_match_fold<'a>(
 /// refresh through the projection's one cache. One value carries both the
 /// per-value policy and whether the post-projection row sweep runs, so the
 /// two cannot disagree.
-enum Refresh<'a> {
+pub(crate) enum Refresh<'a> {
     Identity,
     Materialize(&'a mut MaterializeCache),
 }
@@ -437,6 +423,19 @@ impl Refresh<'_> {
     }
 }
 
+/// Where a `RETURN`/`WITH` projection's incoming rows come from. The sink's
+/// caller is the only authority for the projected case: a row carries no
+/// marker a user alias could forge, and an ordinary batch whose bindings
+/// happen to bind every output name is still evaluated, not passed through.
+pub(crate) enum RowSource {
+    /// Bindings the projection must evaluate its items against.
+    Bindings,
+    /// The match sink already evaluated this clause's items on every row
+    /// (their columns plus the parked `__ord*` sort keys), so only the
+    /// sort, page, DISTINCT, and column-extraction stages are left.
+    SinkProjected,
+}
+
 pub(crate) fn project_rows(
     ctx: ExecCtx<'_>,
     feed: RowFeed<'_>,
@@ -455,7 +454,14 @@ pub(crate) fn project_rows(
     // that path, so the materialized bag is the full input the sort and the
     // page see.
     let preprojected = matches!(source, RowSource::SinkProjected);
-    let (rows, stream) = materialize_feed(graph, params, feed, &class)?;
+    // The clause's paging bounds, resolved once, and the bounded window of
+    // the ordered `LIMIT` shape (ADR-0555 §3) derived from them — the one
+    // pair of facts the feed, the merge paths and the finish tail all read,
+    // so a nondeterministic bound cannot size the window differently from
+    // the page it feeds.
+    let bounds = class.page_bounds(graph, params)?;
+    let window_keep = class.window_keep(bounds);
+    let (rows, stream) = materialize_feed(graph, params, feed, &class, window_keep)?;
     // One cache for the whole projection: its expressions never write, so
     // the graph state, and with it each payload's refresh, is fixed here.
     let mut cache = MaterializeCache::default();
@@ -465,16 +471,16 @@ pub(crate) fn project_rows(
         Refresh::Identity
     };
     let merged = if preprojected {
-        preprojected_rows(graph, rows, &mut refresh)?
+        preprojected_rows(graph, rows, &mut refresh, &class, window_keep, params)?
     } else {
         match class.shape {
             ProjectionShape::Star => star_rows(
                 graph,
                 params,
-                rows,
-                class.fields.items,
-                &class.order_keys,
+                stream.unwrap_or(RowFeed::Held(rows)),
+                &class,
                 &mut refresh,
+                window_keep,
             )?,
             ProjectionShape::Aggregate { .. } => aggregate_rows(
                 graph,
@@ -484,10 +490,17 @@ pub(crate) fn project_rows(
                 scope,
                 &mut refresh,
             )?,
-            ProjectionShape::Plain => plain_rows(graph, params, rows, &class, &mut refresh)?,
+            ProjectionShape::Plain => plain_rows(
+                graph,
+                params,
+                stream.unwrap_or(RowFeed::Held(rows)),
+                &class,
+                &mut refresh,
+                window_keep,
+            )?,
         }
     };
-    finish_projection(graph, params, &class, merged)
+    finish_projection(graph, params, &class, merged, bounds, window_keep.is_some())
 }
 
 /// The feed as the merge paths consume it — the pipeline's materialization
@@ -502,10 +515,14 @@ fn materialize_feed<'a>(
     params: &BTreeMap<String, Value>,
     feed: RowFeed<'a>,
     class: &ProjectionClass<'_>,
+    window_keep: Option<usize>,
 ) -> Result<(Vec<Row>, Option<RowFeed<'a>>)> {
     let (rows, stream) = match feed {
         RowFeed::Held(rows) => (rows, None),
-        RowFeed::Unwind(unwind) if class.shape.streams() => {
+        // A generated feed stays generated for the shapes that fold it as
+        // rows arrive: the aggregation (as ever) and the ordered window,
+        // which must not collect what a `skip + limit` heap bounds.
+        RowFeed::Unwind(unwind) if class.shape.folds(window_keep) => {
             (Vec::new(), Some(RowFeed::Unwind(unwind)))
         }
         folded @ RowFeed::Folded(_) => (Vec::new(), Some(folded)),
@@ -530,111 +547,26 @@ fn materialize_feed<'a>(
     Ok((rows, stream))
 }
 
-/// The projection's finish tail, shared by every merge path — the
-/// pipeline's last stage: the plain WHERE filter over the merged rows,
-/// then the paging stages (the post-merge bounds, the parked-key sort
-/// with its top-k selection, the DISTINCT first-seen pass with its
-/// row-buffer charge re-measured at each shrink, the page itself), then
-/// the result extraction. The eager stop already paged on its own
-/// resolved bounds ([`materialize_feed`]), so the tail pages only on the
-/// non-eager path.
-fn finish_projection(
-    graph: &ExecGraph<'_>,
-    params: &BTreeMap<String, Value>,
-    class: &ProjectionClass<'_>,
-    merged: Vec<Row>,
-) -> Result<Vec<Row>> {
-    let ProjectionFields {
-        distinct,
-        skip,
-        limit,
-        ..
-    } = class.fields;
-    let mut merged = if let Some(w) = class.where_mode.and_then(WhereMode::plain) {
-        filter_rows_where(graph, params, w, merged)?
-    } else {
-        merged
-    };
-    let (skip_n, limit_n) = if class.eager_paged {
-        (0, None)
-    } else {
-        resolve_page_bounds(graph, params, skip, limit)?
-    };
-    if !class.order_keys.is_empty() {
-        let top_k = match (distinct, limit_n) {
-            (false, Some(lim)) => skip_n.checked_add(lim),
-            _ => None,
-        };
-        sort_rows_by_parked_keys(&class.order_keys, &mut merged, top_k)?;
-    }
-    // The DISTINCT pass's row-buffer charge: Option-held from
-    // [`retain_distinct`] — it exists only on the distinct shape, and
-    // every later re-measure (the page, the output conversion) walks the
-    // held charge instead of re-checking the mode beside an empty
-    // sentinel.
-    let mut retained_rows = if distinct {
-        let keys = if class.shape.star() {
-            DistinctKeys::Visible
-        } else {
-            DistinctKeys::Columns(&class.out_names)
-        };
-        let (kept, charge) = retain_distinct(merged, keys)?;
-        merged = kept;
-        Some(charge)
-    } else {
-        None
-    };
-    if let Some(charge) = retained_rows.as_mut() {
-        charge.resize_with(|| crate::workspace::row_buffer_bytes(&merged))?;
-    }
-    merged = page(merged, skip_n, limit_n);
-    if let Some(charge) = retained_rows.as_mut() {
-        charge.resize_with(|| crate::workspace::row_buffer_bytes(&merged))?;
-    }
-    if class.shape.star() {
-        // The parked keys were sort surface only; a `*` row keeps exactly
-        // the incoming bindings and the explicit items.
-        unpark_order_keys(&class.order_keys, &mut merged);
-        drop(retained_rows);
-        return Ok(merged);
-    }
-    let names = RowNames::new(&class.out_names);
-    let mut out = Vec::with_capacity(merged.len());
-    for mut row in merged {
-        let values = class
-            .out_names
-            .iter()
-            .map(|name| {
-                row.take_value(name)
-                    .expect("projection rows carry every result column")
-            })
-            .collect();
-        out.push(Row::from_names(&names, values));
-    }
-    if let Some(charge) = retained_rows.as_mut() {
-        charge.resize_with(|| crate::workspace::row_buffer_bytes(&out))?;
-    }
-    drop(retained_rows);
-    Ok(out)
-}
-
 /// The pass-through mode: the match sink already evaluated the items, so
 /// only the inflate refresh and the one landing charge remain.
 fn preprojected_rows(
     graph: &ExecGraph<'_>,
-    mut rows: Vec<Row>,
+    rows: Vec<Row>,
     refresh: &mut Refresh<'_>,
+    class: &ProjectionClass<'_>,
+    window_keep: Option<usize>,
+    params: &BTreeMap<String, Value>,
 ) -> Result<Vec<Row>> {
     // ADR-0463 (LABS-781): the pass-through's output container is as
     // retaining as the plain branch's — refreshed payloads under inflate,
-    // and every row's buffers — so its landings grow the same running
-    // total (one policy, every merge path).
-    let mut retained = graph.retain_bytes(0)?;
-    refresh.rows(graph, &mut rows);
-    for row in &rows {
-        retained.add_row(graph, row.values())?;
+    // and every row's buffers — through the one landing policy; the
+    // ordered-window shape lands into the bounded heap instead.
+    let mut landing = Landing::open(graph, params, class, window_keep)?;
+    for mut row in rows {
+        refresh.rows(graph, std::slice::from_mut(&mut row));
+        landing.land(graph, row)?;
     }
-    Ok(rows)
+    Ok(landing.finish())
 }
 
 /// The `RETURN *` mode: the visible incoming bindings plus the explicit
@@ -642,41 +574,41 @@ fn preprojected_rows(
 fn star_rows(
     graph: &ExecGraph<'_>,
     params: &BTreeMap<String, Value>,
-    rows: Vec<Row>,
-    items: &[Projection],
-    order_keys: &OrderKeys<'_>,
+    feed: RowFeed<'_>,
+    class: &ProjectionClass<'_>,
     refresh: &mut Refresh<'_>,
+    window_keep: Option<usize>,
 ) -> Result<Vec<Row>> {
+    let items = class.fields.items;
+    let order_keys = &class.order_keys;
     // ADR-0463 (LABS-781): the star branch's output rows are as retaining
-    // as the plain branch's — same guard, same landing charge, after the
+    // as the plain branch's — same guard, same landing policy — after the
     // spent source row is dropped so `owned_heap` sees the output
-    // container's real ownership.
-    let mut retained = graph.retain_bytes(0)?;
-    rows.into_iter()
-        .map(|r| -> Result<Row> {
-            let mut n = Row::new();
-            for (k, v) in &r {
-                if !is_internal_column(k) {
-                    n.insert(k.clone(), refresh.apply(graph, v.clone()));
-                }
+    // container's real ownership. The ordered-window shape lands the same
+    // built row into the bounded heap instead.
+    let mut landing = Landing::open(graph, params, class, window_keep)?;
+    let mut built = |r: Row| -> Result<Row> {
+        let mut n = Row::new();
+        for (k, v) in &r {
+            if !is_internal_column(k) {
+                n.insert(k.clone(), refresh.apply(graph, v.clone()));
             }
-            for (index, projection) in items.iter().enumerate() {
-                if is_star_item(projection) {
-                    continue;
-                }
-                let value = eval(graph, &r, &projection.expr, params)?;
-                n.insert(projection.output_name(index), refresh.apply(graph, value));
+        }
+        for (index, projection) in items.iter().enumerate() {
+            if is_star_item(projection) {
+                continue;
             }
-            drop(r);
-            park_order_keys(order_keys, &mut n, |expr, scope| {
-                eval(graph, scope, expr, params)
-            })?;
-            // The star branch's output row landing in its final shape,
-            // through the same one `add_row` charge.
-            retained.add_row(graph, n.values())?;
-            Ok(n)
-        })
-        .collect::<Result<Vec<_>>>()
+            let value = eval(graph, &r, &projection.expr, params)?;
+            n.insert(projection.output_name(index), refresh.apply(graph, value));
+        }
+        drop(r);
+        park_order_keys(order_keys, &mut n, |expr, scope| {
+            eval(graph, scope, expr, params)
+        })?;
+        Ok(n)
+    };
+    feed.try_for_each(|r| landing.land(graph, built(r)?))?;
+    Ok(landing.finish())
 }
 
 /// The aggregation mode: HAVING (the aggregate-call WHERE) is evaluated per
@@ -720,15 +652,16 @@ fn aggregate_rows(
 
 /// The plain projection mode: each item over the incoming row, the kept
 /// bindings the subclauses may name, then the parked order keys — one
-/// landing charge per output row. The items, the parked-key plan and the
+/// landing policy per output row. The items, the parked-key plan and the
 /// plain WHERE are the classification's own — read from it, never handed
 /// back as loose parameters.
 fn plain_rows(
     graph: &ExecGraph<'_>,
     params: &BTreeMap<String, Value>,
-    rows: Vec<Row>,
+    feed: RowFeed<'_>,
     class: &ProjectionClass<'_>,
     refresh: &mut Refresh<'_>,
+    window_keep: Option<usize>,
 ) -> Result<Vec<Row>> {
     let items = class.fields.items;
     let order_keys = &class.order_keys;
@@ -740,13 +673,14 @@ fn plain_rows(
     for expr in order_keys.exprs() {
         expr_vars(expr, &mut keep);
     }
-    let mut out = Vec::new();
     // ADR-0463: the projected rows are one retaining container. Each output
     // row's payloads plus its buffers grow the running total; the
     // per-allocation checks alone cannot see a many-row result whose rows
-    // each build a large but under-cap value.
-    let mut retained = graph.retain_bytes(0)?;
-    for mut row in rows {
+    // each build a large but under-cap value. The ordered-window shape
+    // (ADR-0555 §3) lands the same built row into the bounded top-k heap
+    // instead, its plain WHERE read as each row arrives.
+    let mut landing = Landing::open(graph, params, class, window_keep)?;
+    let mut built = |mut row: Row| -> Result<Row> {
         // The item values first, against the incoming row, then the kept
         // bindings (a `WITH` filter or an `ORDER BY` key may name one the
         // projection does not produce), then the items over them — the
@@ -785,16 +719,10 @@ fn plain_rows(
         park_order_keys(order_keys, &mut row2, |expr, scope| {
             eval(graph, scope, expr, params)
         })?;
-        // The built row landing in the output container, in its final
-        // shape: the identity rule counts each distinct payload once
-        // however many slots reference it (a projected alias and its
-        // parked ORDER BY clone count the payload once, a fresh constructed
-        // key its own), and the buffer figure carries the parked columns'
-        // slots.
-        retained.add_row(graph, row2.values())?;
-        out.push(row2);
-    }
-    Ok(out)
+        Ok(row2)
+    };
+    feed.try_for_each(|row| landing.land(graph, built(row)?))?;
+    Ok(landing.finish())
 }
 
 #[cfg(test)]
