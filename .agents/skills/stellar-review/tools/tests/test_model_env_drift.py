@@ -30,6 +30,19 @@ guarded steps are enumerated from the workflow itself (every step
 after the model step whose env maps GH_TOKEN), so adding a step or
 renaming a pin in the workflow fails the drift test until every
 token-bearing post step carries the full list.
+
+The same step env pins git's configuration file sources (the round-5
+finding: the model shell can write .git/config, the worktree-scoped
+config and the shared HOME gitconfig, and every git command the post
+steps run parses them) — GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM at
+/dev/null, GIT_CONFIG_NOSYSTEM on, GIT_CONFIG_COUNT zeroed (the
+env-numbered `GIT_CONFIG_KEY_n` pairs are git configuration too,
+plantable through the same runner env file) — and every restore-path
+git invocation (the staging `git show` and the helper's reset, clean
+and ls-files) pins the repository config's code-execution knobs off
+per invocation with `-c core.fsmonitor= -c core.pager=cat`.
+review-restore.sh must export the same config-source pins in-script,
+the PATH-pin defense-in-depth precedent.
 """
 
 import glob
@@ -127,6 +140,23 @@ PINNED_STARTUP_VARS = (
     "GEM_HOME",
     "GEM_PATH",
 )
+
+# The git configuration sources every token-bearing post step pins away
+# (the round-5 finding: the model shell can write .git/config, the
+# worktree-scoped config and the shared HOME gitconfig, and every git
+# command the post steps run parses them): the global (shared HOME) and
+# system gitconfigs point at /dev/null, the system file is skipped
+# outright, and the env-numbered config channel is zeroed —
+# GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n pairs are git configuration too,
+# plantable through the runner env file under RUNNER_TEMP. The values
+# are the workflow's step env spellings; review-restore.sh exports the
+# same pins in-script (defense-in-depth, the PATH-pin precedent).
+PINNED_GIT_CONFIG = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "'1'",
+    "GIT_CONFIG_COUNT": "'0'",
+}
 
 
 def mapping_entry(region, name):
@@ -296,9 +326,12 @@ class TestModelEnvDrift(unittest.TestCase):
         # review-restore.sh — the model step could have rewritten it
         # before any token-bearing step runs. Each stages the committed
         # PR-head copy (git show of the event payload's head SHA) into a
-        # fresh mktemp file and sources that; the helper then resets to
-        # RESTORE_SHA — the event payload's merge SHA, never the
-        # model-moveable local HEAD.
+        # fresh mktemp file and sources that; the staging show carries
+        # the per-invocation -c overrides, so a model-written .git/config
+        # cannot steer even this first git call (the step env pins the
+        # file sources, but the repository config still parses); the
+        # helper then resets to RESTORE_SHA — the event payload's merge
+        # SHA, never the model-moveable local HEAD.
         text = read(REUSABLE)
         self.assertNotIn(
             ". .github/scripts/review-restore.sh",
@@ -307,12 +340,15 @@ class TestModelEnvDrift(unittest.TestCase):
             "review-restore.sh — it must stage the committed PR-head copy "
             "via git show instead (ADR-0603)",
         )
-        staging = 'git show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"'
+        staging = (
+            'git -c core.fsmonitor= -c core.pager=cat show '
+            '"$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"'
+        )
         self.assertEqual(
             text.count(staging),
             3,
             f"{REUSABLE}: expected the three restore call sites to stage "
-            "review-restore.sh with git show of the PR head SHA",
+            "review-restore.sh with the pinned git show of the PR head SHA",
         )
         self.assertEqual(
             text.count('. "$RESTORE"'),
@@ -362,6 +398,56 @@ class TestModelEnvDrift(unittest.TestCase):
                     f"{REUSABLE}: the '{name}' step must pin PATH to the "
                     "fixed system list review-restore.sh pins — the "
                     "workflow-fixed value, never model-published content",
+                )
+
+    def test_post_steps_pin_git_config_sources(self):
+        # Model-written git configuration must be inert in every git
+        # call a token-bearing post step runs (the round-5 finding):
+        # the model shell can write the shared HOME gitconfig during
+        # the model step, and GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n pairs
+        # planted through the runner env file under RUNNER_TEMP are
+        # parsed as git configuration by every git command. The step
+        # env pins the file sources from process start — before the
+        # staging git show runs. The repository's own .git/config
+        # survives the pin and is handled per invocation instead: the
+        # -c core.fsmonitor= -c core.pager=cat overrides on the
+        # staging git show and inside review-restore.sh. The guarded
+        # steps are the same workflow-derived token-bearing set the
+        # process-start pin test above iterates.
+        for name, step in token_bearing_post_steps():
+            for var, value in PINNED_GIT_CONFIG.items():
+                with self.subTest(step=name, var=var):
+                    self.assertEqual(
+                        env_value(step, var),
+                        value,
+                        f"{REUSABLE}: the '{name}' step must pin {var} "
+                        f"to {value} — model-written git configuration "
+                        "must be inert in every git call the step runs",
+                    )
+
+    def test_restore_helper_exports_the_same_config_pins(self):
+        # review-restore.sh re-exports the step env's config-source
+        # pins in-script — the PATH-pin defense-in-depth precedent: the
+        # sourced choreography must hold in any shell it is sourced
+        # into, and the two spellings must never drift apart.
+        for var, value in PINNED_GIT_CONFIG.items():
+            expected = value.strip("'")
+            with self.subTest(var=var):
+                m = re.search(
+                    r"(?m)^export " + re.escape(var) + r"=(\S+)$",
+                    read(RESTORE_HELPER),
+                )
+                self.assertIsNotNone(
+                    m,
+                    f"{RESTORE_HELPER}: no `export {var}=` pin found — "
+                    "the choreography must re-export the workflow's "
+                    "config-source pins",
+                )
+                self.assertEqual(
+                    m.group(1),
+                    expected,
+                    f"{RESTORE_HELPER}: the {var} pin drifted from the "
+                    f"workflow's step env value ({expected})",
                 )
 
     def test_pass_model_step_env_forwards_every_pass(self):

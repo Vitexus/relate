@@ -36,6 +36,20 @@ name: OpenCode Review — Reusable
 # jobs.<job_id>.steps.env), and the runner applies it before the
 # step's first process starts — where the restore script's in-script
 # PATH pin is already too late for shell/loader startup.
+#
+# The same step env pins git's configuration file sources (the round-5
+# finding: the model shell can write .git/config, the worktree-scoped
+# config and the shared HOME gitconfig, and every git command the post
+# steps run parses them): GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM
+# point at /dev/null, GIT_CONFIG_NOSYSTEM skips the system file
+# outright, and GIT_CONFIG_COUNT=0 zeroes the env-numbered config
+# channel — GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n pairs are git
+# configuration too, plantable through the same RUNNER_TEMP env file.
+# What survives is the repository's own .git/config, whose
+# code-execution knobs are instead pinned per invocation: the staging
+# git show below and every git call inside review-restore.sh carry
+# -c core.fsmonitor= -c core.pager=cat, so a model-written fsmonitor
+# hook or pager can never run there.
 
 on:
   workflow_call:
@@ -320,7 +334,8 @@ jobs:
       # with all inline comments, derives the verdict, and updates the
       # summary comment. Missing/invalid findings fail closed (ADR-0258).
       # Only .stellar/findings.json is model output: the restore-and-harden
-      # choreography (pinned PATH, neutralized hooks, reset to the
+      # choreography (pinned PATH, model-written git configuration
+      # neutralized, hooks off, reset to the
       # event-payload merge SHA, the untracked sweep outside .stellar,
       # findings-file rejection, the timeout marker read into TIMED_OUT)
       # is review-restore.sh — one spelling shared with the per-kind post
@@ -367,6 +382,19 @@ jobs:
           GEM_HOME: ''
           GEM_PATH: ''
           PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          # Git configuration source pins (see the header note): the
+          # model step can write the shared HOME gitconfig and plant
+          # env-numbered config pairs through the runner env file —
+          # pinning every file source (global, system, env-numbered)
+          # makes model-written configuration inert from process
+          # start, before the staging git show below runs;
+          # review-restore.sh re-exports the same pins
+          # (defense-in-depth) and overrides the repository config's
+          # fsmonitor/pager knobs per git invocation.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_COUNT: '0'
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree
           # copy is model-writable, so the committed PR-head copy — git
@@ -374,8 +402,12 @@ jobs:
           # PR tree (the prep step fetched the endpoints, so it
           # resolves; a missing object fails this step closed) — is
           # staged into a fresh mktemp file and sourced from there.
+          # The staging show carries the per-invocation -c overrides —
+          # the step env pins the config file sources, but the
+          # repository's own .git/config still parses, and its
+          # fsmonitor/pager knobs are code execution.
           RESTORE="$(mktemp)"
-          git show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          git -c core.fsmonitor= -c core.pager=cat show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
           # shellcheck disable=SC1090
           . "$RESTORE" .stellar/findings.json .stellar/findings.partial.json
           .github/scripts/stellar-prep.sh post
@@ -481,6 +513,19 @@ jobs:
           GEM_HOME: ''
           GEM_PATH: ''
           PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          # Git configuration source pins (see the header note): the
+          # model step can write the shared HOME gitconfig and plant
+          # env-numbered config pairs through the runner env file —
+          # pinning every file source (global, system, env-numbered)
+          # makes model-written configuration inert from process
+          # start, before the staging git show below runs;
+          # review-restore.sh re-exports the same pins
+          # (defense-in-depth) and overrides the repository config's
+          # fsmonitor/pager knobs per git invocation.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_COUNT: '0'
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree
           # copy is model-writable, so the committed PR-head copy — git
@@ -488,8 +533,12 @@ jobs:
           # PR tree (the prep step fetched the endpoints, so it
           # resolves; a missing object fails this step closed) — is
           # staged into a fresh mktemp file and sourced from there.
+          # The staging show carries the per-invocation -c overrides —
+          # the step env pins the config file sources, but the
+          # repository's own .git/config still parses, and its
+          # fsmonitor/pager knobs are code execution.
           RESTORE="$(mktemp)"
-          git show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          git -c core.fsmonitor= -c core.pager=cat show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
           # shellcheck disable=SC1090
           . "$RESTORE" .stellar/findings.json
           # Facts and the diff are recomputed from git — never from the
@@ -527,7 +576,8 @@ jobs:
         # instead of skipping green on a dead runner. Every pipeline ran
         # a shell-capable model step, so the workspace is re-entered
         # through the shared review-restore.sh first (pinned PATH,
-        # neutralized hooks, reset to the event-payload merge SHA) —
+        # model-written git configuration neutralized, hooks off, reset
+        # to the event-payload merge SHA) —
         # staged from trusted content like the two posts — with
         # --no-clean: the verdict file is untracked and must survive.
         if: always()
@@ -566,6 +616,19 @@ jobs:
           GEM_HOME: ''
           GEM_PATH: ''
           PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          # Git configuration source pins (see the header note): the
+          # model step can write the shared HOME gitconfig and plant
+          # env-numbered config pairs through the runner env file —
+          # pinning every file source (global, system, env-numbered)
+          # makes model-written configuration inert from process
+          # start, before the staging git show below runs;
+          # review-restore.sh re-exports the same pins
+          # (defense-in-depth) and overrides the repository config's
+          # fsmonitor/pager knobs per git invocation.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_COUNT: '0'
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree
           # copy is model-writable, so the committed PR-head copy — git
@@ -573,8 +636,12 @@ jobs:
           # PR tree (the prep step fetched the endpoints, so it
           # resolves; a missing object fails this step closed) — is
           # staged into a fresh mktemp file and sourced from there.
+          # The staging show carries the per-invocation -c overrides —
+          # the step env pins the config file sources, but the
+          # repository's own .git/config still parses, and its
+          # fsmonitor/pager knobs are code execution.
           RESTORE="$(mktemp)"
-          git show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          git -c core.fsmonitor= -c core.pager=cat show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
           # shellcheck disable=SC1090
           . "$RESTORE" --no-clean
           .github/scripts/enforce-opencode-verdict.sh
