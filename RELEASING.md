@@ -45,6 +45,13 @@ from this repository; the old repository’s tags never came across.
 
 ## What the run does, in order
 
+0. **Third-party licenses** (parallel with the bump, report-only) — the
+   `licenses` job runs
+   [`third-party-licenses.yml`](.github/workflows/third-party-licenses.yml):
+   the shipped dependency closure is checked against the Apache-2.0-compatible
+   allow-list in `deny.toml` and `THIRDPARTY-NOTICES.md` is checked for drift
+   (see [Third-party licenses](#third-party-licenses)). It warns, never fails,
+   and is not a `tag` prerequisite until enforcement is switched on.
 1. **Version bump** — versions are bumped across the Cargo workspace and the
    Python package, the changelog is rotated, and the bump commit is pushed to
    `main`.
@@ -110,6 +117,38 @@ from this repository; the old repository’s tags never came across.
    an IAM role that trusts only `release.yml` running from `main`; the role
    ARN and repository name come from the `AWS_ECR_PUSH_ROLE_ARN` and
    `AWS_ECR_REPOSITORY` secrets. Offline releases skip both jobs.
+
+## Third-party licenses
+
+Every binary release is the Rust closure of four crates — `relate-cli` (the
+CLI), `relate-ffi` (the native library under the JavaScript, Java, Go and
+Swift clients), `relate-python` (the wheels) and `relate-wasm` (the WASM
+bundle). Dev-dependencies and `testing/*` crates never ship and are out of
+scope. `THIRDPARTY-NOTICES.md` at the repository root carries the license
+text and the crate list for that closure, meeting the attribution
+requirements of the libraries we ship; the release attaches it next to the
+binaries (ADR-0605).
+
+**Maintain it on every dependency change** (a `Cargo.lock` change to a
+shipped crate's closure) — and re-check it at release time:
+
+```sh
+cargo install --locked cargo-about@0.9.2 cargo-deny@0.20.2   # once
+python3 scripts/third-party-licenses.py notices --write      # regenerate, commit
+python3 scripts/third-party-licenses.py all                  # drift + policy report
+```
+
+- **Policy** (`deny.toml`, mirrored by `about.toml`): the allow-list is the
+  Apache-2.0-compatible permissive set the closure uses today. A new license
+  is a deliberate edit to both files — never an accident — and anything
+  copyleft or non-commercial must be raised with the maintainers first.
+- **Report-only today.** `third-party-licenses.yml` warns on a violation or a
+  stale notices file; it does not fail the release. Once a few releases show
+  it never false-fails, enforce it: pass `enforce: true` from `release.yml`'s
+  `licenses` job and add that job to the `tag` job's `needs`.
+- **Dry run:** `gh workflow run third-party-licenses.yml` (optionally
+  `-f enforce=true`) runs the same job alone; the freshly generated notices
+  are uploaded as the `third-party-notices` artifact.
 
 ## Registry publishing
 

@@ -74,6 +74,19 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+  # LABS-1690: the license gate for the shipped dependency closure. Early and
+  # parallel with the version bump, report-only for now (violations and
+  # THIRDPARTY-NOTICES.md drift warn, never fail), and deliberately not in
+  # the `tag` job's needs: it cannot hold a release back until enforcement
+  # is switched on (third-party-licenses.yml's `enforce` input, then add it
+  # to `needs`). Dry-run it alone: `gh workflow run third-party-licenses.yml`.
+  licenses:
+    name: Third-party licenses
+    needs: release-owner
+    permissions:
+      contents: read
+    uses: ./.github/workflows/third-party-licenses.yml
+
   version:
     name: Bump version
     needs: release-owner
@@ -1222,6 +1235,11 @@ jobs:
           find artifacts -type f \( -name "relate-*" -o -name "*.whl" -o -name "*.tar.gz" \
             -o -name "*.jar" -o -name "RelateFFI.xcframework.zip" \) \
             -exec cp {} release/ \;
+
+      # The third-party notices the binaries carry (LABS-1690): the committed
+      # THIRDPARTY-NOTICES.md at the tagged commit, shipped next to them.
+      - name: Add the third-party notices
+        run: cp THIRDPARTY-NOTICES.md release/
 
       # Bind the registry-bound assets to this run: publish-registries.yml
       # verifies the attestation before uploading anything, so bytes swapped
