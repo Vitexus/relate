@@ -2,9 +2,13 @@
 # restore-and-harden choreography of the opencode review lanes
 # (opencode-review-reusable.yml's two post steps and the Enforce
 # verdict step; ADR-0603). Each choreography element the helper owns
-# is pinned here: PATH pin, hooks neutralization, reset to HEAD, the
+# is pinned here: PATH pin, hooks neutralization, the reset to the
+# event-payload RESTORE_SHA (never the model-moveable local HEAD), the
 # untracked sweep outside .stellar, findings-file rejection, the
 # timeout marker read, and the --no-clean shape the enforce gate uses.
+# The trusted-source staging the workflow wraps around every sourcing
+# (git show of the PR head SHA into a fresh mktemp file) is pinned by
+# the tamper fixture at the bottom.
 #
 # Local run:
 #   bats .github/scripts/tests/review-restore.bats
@@ -40,7 +44,9 @@ teardown() {
 
 # A scratch repo standing in for the runner checkout: one tracked file,
 # an ignore rule for the droplet, and .stellar/ (ignored, as in the
-# real repo) as the model-output channel.
+# real repo) as the model-output channel. Exports RESTORE_SHA — the
+# event-payload SHA every call site passes: the commit the checkout
+# started from (the fixture's only commit, i.e. its HEAD at birth).
 make_repo() {
   REPO="${TEST_TMP}/repo"
   mkdir -p "${REPO}/.stellar"
@@ -51,6 +57,8 @@ make_repo() {
   printf 'droplet.txt\n.stellar/\n' > "${REPO}/.gitignore"
   git -C "${REPO}" add tracked.txt .gitignore
   git -C "${REPO}" commit -qm base
+  RESTORE_SHA="$(git -C "${REPO}" rev-parse HEAD)"
+  export RESTORE_SHA
 }
 
 # Source the helper the way the workflow steps do — inside the scratch
@@ -120,7 +128,7 @@ run_helper() {
 # Reset and clean
 # ---------------------------------------------------------------------------
 
-@test "staged and unstaged edits reset to HEAD; untracked and ignored shadows outside .stellar removed, .stellar kept" {
+@test "staged and unstaged edits reset to the trusted RESTORE_SHA; untracked and ignored shadows outside .stellar removed, .stellar kept" {
   make_repo
   # the model can edit AND stage — checkout -- would restore from the index
   echo tampered > "${REPO}/tracked.txt"
@@ -150,6 +158,87 @@ run_helper() {
   [ "$(cat "${REPO}/tracked.txt")" = "base" ]
   [ -f "${REPO}/.opencode-verdict.txt" ]
   [ -f "${REPO}/shadow.txt" ]
+}
+
+# ---------------------------------------------------------------------------
+# Trusted reset target
+# ---------------------------------------------------------------------------
+
+@test "sourcing without RESTORE_SHA fails loudly — no fallback to local HEAD, which the model can move" {
+  make_repo
+  RESTORE_SHA= run_helper .stellar/findings.json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"RESTORE_SHA required"* ]]
+}
+
+@test "the reset targets RESTORE_SHA, never a locally moved HEAD (the model can commit and move HEAD)" {
+  make_repo
+  # the model commits its tampered tree and moves HEAD: a reset to HEAD
+  # would restore the model's tree instead of the reviewed one
+  echo moved > "${REPO}/tracked.txt"
+  git -C "${REPO}" add tracked.txt
+  git -C "${REPO}" commit -qm "model commit moves HEAD"
+  [ "$(git -C "${REPO}" rev-parse HEAD)" != "$RESTORE_SHA" ]
+  run_helper .stellar/findings.json
+  [ "$status" -eq 0 ]
+  [ "$(cat "${REPO}/tracked.txt")" = "base" ]
+  [ "$(git -C "${REPO}" rev-parse HEAD)" = "$RESTORE_SHA" ]
+}
+
+# ---------------------------------------------------------------------------
+# Trusted-source staging (the workflow's sourcing path)
+# ---------------------------------------------------------------------------
+
+@test "a model-rewritten worktree copy of the helper cannot alter what a token-bearing step executes — the trusted source wins" {
+  # The tamper fixture: the PR head commit (the stand-in for the
+  # event payload's head SHA) holds the real helper at
+  # .github/scripts/review-restore.sh, and the model step has
+  # rewritten the worktree copy. The workflow path stages the
+  # committed copy via git show into a fresh mktemp file and sources
+  # that — the worktree copy is never consulted.
+  REPO="${TEST_TMP}/repo"
+  mkdir -p "${REPO}/.github/scripts" "${REPO}/.stellar"
+  git -C "${REPO}" init -q
+  git -C "${REPO}" config user.email review-restore@test
+  git -C "${REPO}" config user.name "review-restore test"
+  cp "${SCRIPT}" "${REPO}/.github/scripts/review-restore.sh"
+  echo base > "${REPO}/tracked.txt"
+  printf 'droplet.txt\n.stellar/\n' > "${REPO}/.gitignore"
+  git -C "${REPO}" add .github/scripts/review-restore.sh tracked.txt .gitignore
+  git -C "${REPO}" commit -qm base
+  PR_HEAD="$(git -C "${REPO}" rev-parse HEAD)"
+  RESTORE_SHA="$PR_HEAD"
+  export RESTORE_SHA
+  # the model step rewrites the worktree copy of the helper (and the
+  # tracked file, to prove the real choreography really ran) — the
+  # tamper is maximally observable: a stderr banner, a marker file, a
+  # poisoned PATH, and no reset
+  {
+    echo 'echo "TAMPER_RAN" >&2'
+    echo 'touch .tamper-ran'
+    echo 'export PATH=/tmp/model-bin:$PATH'
+    echo 'return 0'
+  } > "${REPO}/.github/scripts/review-restore.sh"
+  echo tampered > "${REPO}/tracked.txt"
+  # the workflow's path: stage the committed PR-head copy, source it
+  run bash -c '
+    cd "$1" || exit 1
+    RESTORE="$(mktemp)"
+    git show "$2:.github/scripts/review-restore.sh" > "$RESTORE"
+    . "$RESTORE" "${@:3}"
+    printf "TIMED_OUT=%s\n" "${TIMED_OUT:-unset}"
+    printf "PATH=%s\n" "${PATH}"
+  ' _ "${REPO}" "${PR_HEAD}" .stellar/findings.json
+  [ "$status" -eq 0 ]
+  # the trusted copy ran: the reset restored the reviewed tree, the
+  # PATH pin and the timeout-marker read reached the sourcing shell
+  [ "$(cat "${REPO}/tracked.txt")" = "base" ]
+  [[ "$output" == *"PATH=${PINNED_PATH}"* ]]
+  [[ "$output" == *"TIMED_OUT=0"* ]]
+  # the tampered copy never executed, and its rewrite did not survive
+  [[ "$output" != *"TAMPER_RAN"* ]]
+  [ ! -e "${REPO}/.tamper-ran" ]
+  cmp -s "${SCRIPT}" "${REPO}/.github/scripts/review-restore.sh"
 }
 
 # ---------------------------------------------------------------------------

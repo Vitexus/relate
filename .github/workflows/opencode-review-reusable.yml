@@ -8,8 +8,11 @@ name: OpenCode Review — Reusable
 # the callers: a workflow_call workflow has no pull_request event of its own,
 # and a called workflow can never exceed the caller job's permissions.
 #
-# Every lane runs the model step without any GitHub token; all posting is
-# scripted in post steps that restore the workspace first (ADR-0603).
+# Every lane runs the model step without any GitHub token and with its
+# $GITHUB_ENV/$GITHUB_PATH publish channels blanked; all posting is
+# scripted in post steps that restore the workspace first — sourcing
+# the restore choreography from the PR head's committed copy, never the
+# model-writable worktree (ADR-0603).
 
 on:
   workflow_call:
@@ -220,6 +223,17 @@ jobs:
           # fails loudly — the model reads its inputs from the scripted
           # artifacts and posting belongs to the post steps.
           GH_TOKEN: none
+          # The model shell must not publish environment variables or
+          # PATH entries into later steps (ADR-0603): the empty-string
+          # entries below replace the runner's $GITHUB_ENV/$GITHUB_PATH
+          # file paths with the empty string, so every write the model
+          # attempts against either fails — a BASH_ENV-style payload it
+          # plants this way is never live in the post steps. PROMPT_FILE,
+          # published by the fixed-value step above, still arrives here
+          # as a normal env var: blanking the channel stops new writes,
+          # it does not unset already-published values.
+          GITHUB_ENV: ''
+          GITHUB_PATH: ''
         # The cap (LABS-635): a wedged model must not hold the lane
         # hostage. SIGINT first (a graceful stop can still flush a
         # findings document), kill 60s later; a timed-out run leaves no
@@ -267,14 +281,15 @@ jobs:
       # with all inline comments, derives the verdict, and updates the
       # summary comment. Missing/invalid findings fail closed (ADR-0258).
       # Only .stellar/findings.json is model output: the restore-and-harden
-      # choreography (pinned PATH, neutralized hooks, reset to HEAD, the
-      # untracked sweep outside .stellar, findings-file rejection, the
-      # timeout marker read into TIMED_OUT) is review-restore.sh — one
-      # spelling shared with the per-kind post and the enforce gate
-      # (ADR-0603). The noop decision is recomputed here (the model can
-      # forge SCRIPTED_NOOP via $GITHUB_ENV to skip this step's cleanup),
-      # and facts/scope/ledger are recomputed from git + the trusted
-      # summary comment.
+      # choreography (pinned PATH, neutralized hooks, reset to the
+      # event-payload merge SHA, the untracked sweep outside .stellar,
+      # findings-file rejection, the timeout marker read into TIMED_OUT)
+      # is review-restore.sh — one spelling shared with the per-kind post
+      # and the enforce gate (ADR-0603), staged from trusted content (see
+      # the run block below). The noop decision is recomputed here, never
+      # trusted from the environment (the model step's publish channels
+      # are blanked; the recompute stays), and facts/scope/ledger are
+      # recomputed from git + the trusted summary comment.
       - name: Post review (scripted)
         if: always() && inputs.pipeline == 'scripted'
         env:
@@ -284,8 +299,22 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           STELLAR_RESOLVE: ${{ vars.STELLAR_RESOLVE }}
+          # The trusted reset target the helper requires: the merge SHA
+          # from the event payload, the commit this checkout started
+          # from — never local HEAD, which the model step could have
+          # moved with a commit.
+          RESTORE_SHA: ${{ github.sha }}
         run: |
-          . .github/scripts/review-restore.sh .stellar/findings.json .stellar/findings.partial.json
+          # Trusted-source the choreography (ADR-0603): the worktree
+          # copy is model-writable, so the committed PR-head copy — git
+          # show of the head SHA from the event payload, the reviewed
+          # PR tree (the prep step fetched the endpoints, so it
+          # resolves; a missing object fails this step closed) — is
+          # staged into a fresh mktemp file and sourced from there.
+          RESTORE="$(mktemp)"
+          git show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          # shellcheck disable=SC1090
+          . "$RESTORE" .stellar/findings.json .stellar/findings.partial.json
           .github/scripts/stellar-prep.sh post
           T=.agents/skills/stellar-review/tools
           # noop is recomputed here, never trusted from the environment
@@ -345,10 +374,12 @@ jobs:
       # hardening, generalized to the rust and security lanes — the model
       # step ran with shell access, so nothing it left behind is trusted.
       # The restore-and-harden choreography is review-restore.sh, the one
-      # spelling shared with the scripted post and the enforce gate. Facts
-      # and the kind's no-op gate are recomputed from git (the model had
-      # the whole run to rewrite .stellar or forge SCRIPTED_NOOP via
-      # $GITHUB_ENV).
+      # spelling shared with the scripted post and the enforce gate,
+      # staged from trusted content (see the run block below). Facts
+      # and the kind's no-op gate are recomputed from git — the model
+      # had the whole run to rewrite .stellar, and its env publish
+      # channels are blanked, so the no-op gate is never trusted from
+      # the environment either.
       - name: Post review (${{ inputs.job_name }})
         if: always() && inputs.pipeline != 'scripted'
         env:
@@ -358,8 +389,22 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_KIND: ${{ inputs.review_kind }}
+          # The trusted reset target the helper requires: the merge SHA
+          # from the event payload, the commit this checkout started
+          # from — never local HEAD, which the model step could have
+          # moved with a commit.
+          RESTORE_SHA: ${{ github.sha }}
         run: |
-          . .github/scripts/review-restore.sh .stellar/findings.json
+          # Trusted-source the choreography (ADR-0603): the worktree
+          # copy is model-writable, so the committed PR-head copy — git
+          # show of the head SHA from the event payload, the reviewed
+          # PR tree (the prep step fetched the endpoints, so it
+          # resolves; a missing object fails this step closed) — is
+          # staged into a fresh mktemp file and sourced from there.
+          RESTORE="$(mktemp)"
+          git show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          # shellcheck disable=SC1090
+          . "$RESTORE" .stellar/findings.json
           # Facts and the diff are recomputed from git — never from the
           # .stellar documents the model step could have rewritten.
           .github/scripts/opencode-review-prep.sh post
@@ -395,16 +440,32 @@ jobs:
         # instead of skipping green on a dead runner. Every pipeline ran
         # a shell-capable model step, so the workspace is re-entered
         # through the shared review-restore.sh first (pinned PATH,
-        # neutralized hooks, reset to HEAD) — with --no-clean: the
-        # verdict file is untracked and must survive.
+        # neutralized hooks, reset to the event-payload merge SHA) —
+        # staged from trusted content like the two posts — with
+        # --no-clean: the verdict file is untracked and must survive.
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_KIND: ${{ inputs.review_kind }}
           VERDICT_FILE: ./.opencode-verdict.txt
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The trusted reset target the helper requires: the merge SHA
+          # from the event payload, the commit this checkout started
+          # from — never local HEAD, which the model step could have
+          # moved with a commit.
+          RESTORE_SHA: ${{ github.sha }}
         run: |
-          . .github/scripts/review-restore.sh --no-clean
+          # Trusted-source the choreography (ADR-0603): the worktree
+          # copy is model-writable, so the committed PR-head copy — git
+          # show of the head SHA from the event payload, the reviewed
+          # PR tree (the prep step fetched the endpoints, so it
+          # resolves; a missing object fails this step closed) — is
+          # staged into a fresh mktemp file and sourced from there.
+          RESTORE="$(mktemp)"
+          git show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          # shellcheck disable=SC1090
+          . "$RESTORE" --no-clean
           .github/scripts/enforce-opencode-verdict.sh
 
       # LABS-615/582: every round's raw documents survive the run even

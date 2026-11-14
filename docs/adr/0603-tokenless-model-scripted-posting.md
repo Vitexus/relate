@@ -44,10 +44,16 @@ Every lane runs the model tokenless; all posting is scripted.
    verdict (ADR-0258's severity gate: any Critical/High/Medium finding
    fails). It reuses the stellar poster's gh mechanics and choreography,
    and the stellar post-step hardening: pinned PATH, neutralized hooks,
-   reset to HEAD, clean outside `.stellar`. A timed-out run never passes
-   — a killed single-shot review's document is not trusted for a
-   verdict. The fail-closed chain through `enforce-opencode-verdict.sh`
-   is unchanged.
+   reset to the event payload's merge SHA (local HEAD is model-moveable),
+   the untracked sweep outside `.stellar`, and the choreography script
+   itself staged from trusted content — git show of the event payload's
+   PR head SHA into a fresh temp file, never the model-writable worktree
+   copy. The model step's env blanks `GITHUB_ENV`/`GITHUB_PATH`
+   (empty-string entries), so the model shell publishes no environment
+   variable or PATH entry — a `BASH_ENV`-style payload included — into
+   the later steps. A timed-out run never passes — a killed
+   single-shot review's document is not trusted for a verdict. The
+   fail-closed chain through `enforce-opencode-verdict.sh` is unchanged.
 
 ## Alternatives considered
 

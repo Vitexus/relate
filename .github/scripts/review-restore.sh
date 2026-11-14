@@ -6,9 +6,17 @@
 # jq, the poster scripts), and a child process cannot export it back.
 #
 #   . .github/scripts/review-restore.sh [--no-clean] <findings-file>...
+#   env: RESTORE_SHA — the event-payload SHA the reset targets
+#        (required; the caller passes the merge SHA github.sha)
 #
 # Always source it with an explicit argument list: a bare `.` source
 # inherits the caller's positional parameters.
+#
+# Source it from trusted content, never the worktree copy: the calling
+# step stages the committed PR-head copy — git show of the head SHA the
+# event payload carries — into a fresh mktemp file and sources that,
+# because the model step could have rewritten any worktree file, this
+# one included, before a token-bearing step runs.
 #
 # The model step runs with shell access, so nothing it left behind is
 # trusted:
@@ -18,9 +26,11 @@
 #     model-written post-checkout hook would fire on the restore
 #     itself (core.hooksPath unset in the repository, pointed at
 #     /dev/null in the global config).
-#   - Tracked files are reset to HEAD — reset --hard, not checkout --:
-#     the model can stage files, and checkout restores from the INDEX;
-#     only HEAD is trusted.
+#   - Tracked files are reset to RESTORE_SHA, the event-payload SHA of
+#     the commit the checkout started from — reset --hard, not
+#     checkout --: the model can stage files, and checkout restores
+#     from the INDEX; and never local HEAD: the model can commit and
+#     move it, so only the event payload's SHA is trusted.
 #   - Untracked shadow files outside .stellar are removed, ignored ones
 #     included (-x: a gitignored droplet must not survive either, and a
 #     planted .opencode-verdict.txt must NOT survive — the poster
@@ -67,7 +77,8 @@ done
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 git config --unset core.hooksPath 2>/dev/null || true
 git config --global core.hooksPath /dev/null
-git reset --hard HEAD
+: "${RESTORE_SHA:?review-restore.sh: RESTORE_SHA required — the trusted reset target from the event payload (local HEAD is model-moveable)}"
+git reset --hard "$RESTORE_SHA"
 if [ "$NO_CLEAN" -ne 1 ]; then
   git clean -fdx -- . ':(exclude).stellar'
 fi

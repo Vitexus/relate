@@ -8,7 +8,15 @@ reusable one), SKILL.md's MODEL TIERS rule, and the
 review-scripts-test path filter — must agree with it. The pass names stay
 out of the shared Run OpenCode step, whose only override is
 OPENCODE_REVIEW_MODEL. The default model pin the override falls back to
-must match ADR-0302's Decision table in both workflows that carry it."""
+must match ADR-0302's Decision table in both workflows that carry it.
+
+The same file also pins the reusable workflow's two post-model hardening
+guarantees (ADR-0603): the Run OpenCode step's env blanks the
+`GITHUB_ENV`/`GITHUB_PATH` publish channels (a model shell must not
+publish env vars or PATH entries — a BASH_ENV-style payload included —
+into the later, token-bearing steps), and the three restore call sites
+(scripted post, per-kind post, enforce) stage review-restore.sh from the
+PR head SHA's committed copy instead of the model-writable worktree."""
 
 import glob
 import os
@@ -148,6 +156,69 @@ class TestModelEnvDrift(unittest.TestCase):
             f"{REUSABLE}: the Run OpenCode step must carry no STELLAR_MODEL_* "
             "name — pass overrides apply through the pass-model step's "
             "OpenCode config, never the shared model step env",
+        )
+
+    def test_model_step_env_blanks_the_publish_channels(self):
+        # A shell-capable model must not publish environment variables or
+        # PATH entries into later steps: with GITHUB_ENV/GITHUB_PATH set to
+        # the empty string, the runner's env/PATH files are replaced by ''
+        # — not a writable path — so every publish attempt fails and no
+        # BASH_ENV-style payload is live in the post steps. PROMPT_FILE,
+        # published as a fixed value by the earlier prompt step, still
+        # reaches the model step as a normal env var.
+        step = model_step()
+        for name in ("GITHUB_ENV", "GITHUB_PATH"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    env_value(step, name),
+                    "''",
+                    f"{REUSABLE}: the Run OpenCode step env must set {name} "
+                    "to the empty string — the model shell must not publish "
+                    "env or PATH entries into later steps",
+                )
+        self.assertIn(
+            '"$PROMPT_FILE"',
+            step,
+            f"{REUSABLE}: the Run OpenCode step still reads $PROMPT_FILE — "
+            "the fixed-value publish from the prompt-file step must keep "
+            "reaching the model step as a normal env var",
+        )
+
+    def test_restore_call_sites_stage_the_helper_from_trusted_content(self):
+        # The three hardening call sites (scripted post, per-kind post,
+        # enforce) must never source the worktree copy of
+        # review-restore.sh — the model step could have rewritten it
+        # before any token-bearing step runs. Each stages the committed
+        # PR-head copy (git show of the event payload's head SHA) into a
+        # fresh mktemp file and sources that; the helper then resets to
+        # RESTORE_SHA — the event payload's merge SHA, never the
+        # model-moveable local HEAD.
+        text = read(REUSABLE)
+        self.assertNotIn(
+            ". .github/scripts/review-restore.sh",
+            text,
+            f"{REUSABLE}: a restore call site sources the worktree copy of "
+            "review-restore.sh — it must stage the committed PR-head copy "
+            "via git show instead (ADR-0603)",
+        )
+        staging = 'git show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"'
+        self.assertEqual(
+            text.count(staging),
+            3,
+            f"{REUSABLE}: expected the three restore call sites to stage "
+            "review-restore.sh with git show of the PR head SHA",
+        )
+        self.assertEqual(
+            text.count('. "$RESTORE"'),
+            3,
+            f"{REUSABLE}: expected the three restore call sites to source "
+            "the staged trusted copy",
+        )
+        self.assertEqual(
+            text.count("RESTORE_SHA: ${{ github.sha }}"),
+            3,
+            f"{REUSABLE}: each restore call site must pass the event "
+            "payload's merge SHA as RESTORE_SHA — the trusted reset target",
         )
 
     def test_pass_model_step_env_forwards_every_pass(self):
