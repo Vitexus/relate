@@ -18,9 +18,19 @@ name: OpenCode Review — Reusable
 # publication channel: the runner's env file for a later step lives
 # under RUNNER_TEMP at a path a model shell can write directly. Each
 # token-bearing post step therefore pins its process-start environment
-# in its step env block — BASH_ENV, ENV, LD_PRELOAD, LD_LIBRARY_PATH,
-# PYTHONSTARTUP and NODE_OPTIONS pinned to the empty string, PATH to
-# the fixed system list review-restore.sh also pins. A step env entry
+# in its step env block: every env channel the ELF loader and the
+# runner's interpreters document for loading code at process start —
+# the loader's LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT (ld.so(8));
+# the shell startup files BASH_ENV (bash(1)) and ENV (POSIX sh);
+# python's PYTHONSTARTUP, PYTHONPATH and PYTHONHOME (python(1));
+# node's NODE_OPTIONS and NODE_PATH (node(1)); perl's PERL5OPT,
+# PERL5LIB and PERLLIB (perlrun(1)); ruby's RUBYOPT and RUBYLIB
+# (ruby(1)); RubyGems' GEM_HOME and GEM_PATH (gem(1)) — each pinned
+# to the empty string, PATH to the fixed system list
+# review-restore.sh also pins. An empty value is inert for every one
+# of them (an empty list has no entries; an empty startup-file name
+# opens nothing), so the pins change no step behavior — they only
+# hold the channels closed from process start. A step env entry
 # is the most specific Actions env scope and so overrides anything
 # published into the job (workflow-syntax docs,
 # jobs.<job_id>.steps.env), and the runner applies it before the
@@ -343,8 +353,19 @@ jobs:
           ENV: ''
           LD_PRELOAD: ''
           LD_LIBRARY_PATH: ''
+          LD_AUDIT: ''
           PYTHONSTARTUP: ''
+          PYTHONPATH: ''
+          PYTHONHOME: ''
           NODE_OPTIONS: ''
+          NODE_PATH: ''
+          PERL5OPT: ''
+          PERL5LIB: ''
+          PERLLIB: ''
+          RUBYOPT: ''
+          RUBYLIB: ''
+          GEM_HOME: ''
+          GEM_PATH: ''
           PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree
@@ -446,8 +467,19 @@ jobs:
           ENV: ''
           LD_PRELOAD: ''
           LD_LIBRARY_PATH: ''
+          LD_AUDIT: ''
           PYTHONSTARTUP: ''
+          PYTHONPATH: ''
+          PYTHONHOME: ''
           NODE_OPTIONS: ''
+          NODE_PATH: ''
+          PERL5OPT: ''
+          PERL5LIB: ''
+          PERLLIB: ''
+          RUBYOPT: ''
+          RUBYLIB: ''
+          GEM_HOME: ''
+          GEM_PATH: ''
           PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree
@@ -520,8 +552,19 @@ jobs:
           ENV: ''
           LD_PRELOAD: ''
           LD_LIBRARY_PATH: ''
+          LD_AUDIT: ''
           PYTHONSTARTUP: ''
+          PYTHONPATH: ''
+          PYTHONHOME: ''
           NODE_OPTIONS: ''
+          NODE_PATH: ''
+          PERL5OPT: ''
+          PERL5LIB: ''
+          PERLLIB: ''
+          RUBYOPT: ''
+          RUBYLIB: ''
+          GEM_HOME: ''
+          GEM_PATH: ''
           PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: |
           # Trusted-source the choreography (ADR-0603): the worktree

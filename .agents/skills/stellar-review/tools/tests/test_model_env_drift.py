@@ -17,14 +17,19 @@ publish env vars or PATH entries — a BASH_ENV-style payload included —
 into the later, token-bearing steps), the three restore call sites
 (scripted post, per-kind post, enforce) stage review-restore.sh from the
 PR head SHA's committed copy instead of the model-writable worktree,
-and the three token-bearing post steps pin their process-start
-environment at the step env level — BASH_ENV/ENV/LD_PRELOAD/
-LD_LIBRARY_PATH/PYTHONSTARTUP/NODE_OPTIONS pinned to the empty string
-and PATH pinned to the fixed system list review-restore.sh pins —
-because the blanking stops only the model's own file-command writes
-(the runner env file under RUNNER_TEMP stays writable by path), while
-a step env entry, the most specific Actions env scope, overrides
-anything published and holds from process start.
+and every token-bearing post step pins its process-start environment
+at the step env level — the complete set of env channels the ELF
+loader and the runner's interpreters document for loading code at
+process start (PINNED_STARTUP_VARS below), each pinned to the empty
+string and PATH pinned to the fixed system list review-restore.sh
+pins — because the blanking stops only the model's own file-command
+writes (the runner env file under RUNNER_TEMP stays writable by
+path), while a step env entry, the most specific Actions env scope,
+overrides anything published and holds from process start. The
+guarded steps are enumerated from the workflow itself (every step
+after the model step whose env maps GH_TOKEN), so adding a step or
+renaming a pin in the workflow fails the drift test until every
+token-bearing post step carries the full list.
 """
 
 import glob
@@ -81,27 +86,46 @@ CALLERS = tuple(
     )
 )
 
-# The process-start channels every token-bearing post step pins to the
-# empty string: the shell startup files (BASH_ENV — bash's non-interactive
-# startup file; ENV — the POSIX sh counterpart), the ELF dynamic loader's
-# process-start channels (LD_PRELOAD, LD_LIBRARY_PATH — ld.so(8)), and the
-# interpreter startup surfaces (PYTHONSTARTUP — python's startup file,
-# NODE_OPTIONS — node's per-process flags). PATH is pinned separately, to
-# the fixed system list review-restore.sh pins.
+# The complete set of process-start code-injection channels every
+# token-bearing post step pins to the empty string — every env var the
+# ELF loader and the runner's interpreters document for loading code
+# at process start: the shell startup files (BASH_ENV — bash's
+# non-interactive startup file; ENV — the POSIX sh counterpart), the
+# ELF dynamic loader's channels (LD_PRELOAD — a library whose
+# constructors run at process start, LD_LIBRARY_PATH — the search
+# path that resolves every later dependency, LD_AUDIT — an audit
+# object loaded into every process, ld.so(8)), python's startup file
+# and search paths (PYTHONSTARTUP, PYTHONPATH — the module search
+# path that shadows stdlib imports, PYTHONHOME — the relocated
+# standard library itself, python(1)), node's per-process flags and
+# module path (NODE_OPTIONS — flags may carry --require, NODE_PATH —
+# the module search path, node(1)), perl's injected switches and
+# module paths (PERL5OPT — switches may carry -M, PERL5LIB, PERLLIB —
+# the @INC search paths, perlrun(1)), ruby's injected options and
+# load path (RUBYOPT — options may carry -r, RUBYLIB — the $LOAD_PATH
+# entries, ruby(1)), and RubyGems' gem-resolution paths (GEM_HOME,
+# GEM_PATH — gem(1)). An empty value is inert for every one of them —
+# an empty list has no entries and an empty startup-file name opens
+# nothing — so no step behavior changes. PATH is pinned separately,
+# to the fixed system list review-restore.sh pins.
 PINNED_STARTUP_VARS = (
     "BASH_ENV",
     "ENV",
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
+    "LD_AUDIT",
     "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PYTHONHOME",
     "NODE_OPTIONS",
-)
-
-# The token-bearing post-model steps the process-start pinning applies to.
-POST_STEP_NAMES = (
-    "Post review (scripted)",
-    "Post review (${{ inputs.job_name }})",
-    "Enforce verdict",
+    "NODE_PATH",
+    "PERL5OPT",
+    "PERL5LIB",
+    "PERLLIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "GEM_HOME",
+    "GEM_PATH",
 )
 
 
@@ -160,11 +184,44 @@ def pass_model_step():
     )
 
 
-def post_step(name):
-    """The reusable workflow's post-model step with this exact name."""
-    return region_between(
-        read(REUSABLE), r"^ *- name: " + re.escape(name), r"^ *- name: ", REUSABLE
-    )
+def post_model_steps():
+    """(name, region) of every step after the Run OpenCode step, in
+    workflow order — the steps the shell-capable model step precedes.
+    The step-entry indentation is taken from the model step's own
+    line, so deeper `- name:`-shaped text inside a step never splits
+    the enumeration."""
+    text = read(REUSABLE)
+    m = re.search(r"^( *- name:) Run OpenCode", text, re.M)
+    if m is None:
+        raise AssertionError(f"{REUSABLE}: no Run OpenCode step found")
+    rest = text[m.start():]
+    starts = list(re.finditer(r"^" + re.escape(m.group(1)) + r" ", rest, re.M))
+    prefix = len(m.group(1)) + 1
+    steps = []
+    for i, s in enumerate(starts):
+        end = starts[i + 1].start() if i + 1 < len(starts) else len(rest)
+        block = rest[s.start():end]
+        steps.append((block.split("\n", 1)[0][prefix:].rstrip(), block))
+    return steps[1:]  # starts[0] is the model step itself
+
+
+def token_bearing_post_steps():
+    """(name, region) of the post-model steps whose env maps GH_TOKEN —
+    the workflow's marker for a step that authenticates to GitHub as
+    CI, i.e. every step the process-start pinning must cover. The set
+    is derived from the workflow, never hand-listed, so a step added
+    there fails the pin test until it carries the full pin list."""
+    steps = [
+        (name, region)
+        for name, region in post_model_steps()
+        if re.search(r"^ *GH_TOKEN: ", region, re.M)
+    ]
+    if not steps:
+        raise AssertionError(
+            f"{REUSABLE}: no post-model step maps GH_TOKEN — the "
+            "token-bearing step derivation found nothing to guard"
+        )
+    return steps
 
 
 def restore_pinned_path():
@@ -282,9 +339,13 @@ class TestModelEnvDrift(unittest.TestCase):
         # workflow environment variables with the same name, while the
         # step executes"), so pinning there overrides anything the model
         # published — from process start, with fixed literals only.
+        # The guarded steps are not hand-listed: they are enumerated
+        # from the workflow itself (every post-model step whose env
+        # maps GH_TOKEN), so a step added or a pin renamed in the
+        # workflow fails here until every token-bearing post step
+        # carries the full list.
         path = restore_pinned_path()
-        for name in POST_STEP_NAMES:
-            step = post_step(name)
+        for name, step in token_bearing_post_steps():
             for var in PINNED_STARTUP_VARS:
                 with self.subTest(step=name, var=var):
                     self.assertEqual(
