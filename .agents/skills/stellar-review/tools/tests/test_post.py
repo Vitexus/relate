@@ -38,10 +38,12 @@ def patched_post_gh(fake_gh, summary):
     """The one monkeypatch lifecycle for non-dry-run posting tests:
     swap post.gh and post.find_summary_comment for the given fakes and
     restore both on exit — the patch pair and the restore pair cannot
-    drift per copy."""
+    drift per copy. The discovery stub takes the marker argument the
+    real function grew for the per-kind posters (ADR-0603) and ignores
+    it: stellar's own callers always pass the default."""
     orig_gh, orig_find = post.gh, post.find_summary_comment
     post.gh = fake_gh
-    post.find_summary_comment = lambda r, p: summary
+    post.find_summary_comment = lambda repo, pr, marker=None: summary
     try:
         yield
     finally:
