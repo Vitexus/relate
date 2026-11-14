@@ -531,6 +531,46 @@ jobs:
             exit 1
           fi
           dpkg-query -W -f='ca-certificates ${Version}' ca-certificates
+      # The checkout ref below is a job output — untrusted input until
+      # proven otherwise (the CodeQL cache-poisoning alerts on this
+      # file's ffi and npm lanes). Prove it is the commit the
+      # swift-stamp job pushed to main BEFORE the checkout persists
+      # credentials or restores any cache. The release tag is cut only
+      # after every build is green (the `tag` job), so `gh api` of the
+      # tag is not yet possible; containment in branch-protected main —
+      # where only the release pipeline pushes — is the pre-tag
+      # equivalent. Least privilege: no secrets; the read-only default
+      # job token is all the check needs.
+      - name: Verify the stamp sha is trusted main content
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAMP_SHA: ${{ needs.swift-stamp.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sha="${STAMP_SHA:?swift-stamp emitted no sha}"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::malformed stamp sha '${sha}' — expected the 40-hex commit id swift-stamp pushed to main"
+            exit 1
+          fi
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${sha}...main" \
+            --jq .status 2>"$RUNNER_TEMP/stamp-compare.err")" || {
+            echo "::error::stamp sha ${sha} does not resolve against ${GITHUB_REPOSITORY} main — not the commit swift-stamp pushed: $(cat "$RUNNER_TEMP/stamp-compare.err")"
+            exit 1
+          }
+          case "$status" in
+            ahead | identical)
+              # ahead: main contains the stamp commit (maintainer work
+              # landed after the stamp push); identical: the stamp
+              # commit is main's tip.
+              echo "stamp sha ${sha} verified as ${GITHUB_REPOSITORY}@main content (compare: ${status})"
+              ;;
+            *)
+              echo "::error::stamp sha ${sha} is not on ${GITHUB_REPOSITORY}@main (compare: ${status}) — refusing the unverified checkout"
+              exit 1
+              ;;
+          esac
+
       # Build from the stamped release commit (ADR-0572) — the one tree
       # every artifact and the tag share — so artifacts carry the release
       # version.
@@ -802,6 +842,45 @@ jobs:
             exit 1
           fi
           dpkg-query -W -f='ca-certificates ${Version}' ca-certificates
+      # The checkout ref below is a job output — untrusted input until
+      # proven otherwise (the CodeQL cache-poisoning alerts on this
+      # file's ffi and npm lanes). Prove it is the commit the
+      # swift-stamp job pushed to main BEFORE the checkout persists
+      # credentials or restores any cache. The release tag is cut only
+      # after every build is green (the `tag` job), so `gh api` of the
+      # tag is not yet possible; containment in branch-protected main —
+      # where only the release pipeline pushes — is the pre-tag
+      # equivalent. Least privilege: no secrets; the read-only default
+      # job token is all the check needs.
+      - name: Verify the stamp sha is trusted main content
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAMP_SHA: ${{ needs.swift-stamp.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sha="${STAMP_SHA:?swift-stamp emitted no sha}"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::malformed stamp sha '${sha}' — expected the 40-hex commit id swift-stamp pushed to main"
+            exit 1
+          fi
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${sha}...main" \
+            --jq .status 2>"$RUNNER_TEMP/stamp-compare.err")" || {
+            echo "::error::stamp sha ${sha} does not resolve against ${GITHUB_REPOSITORY} main — not the commit swift-stamp pushed: $(cat "$RUNNER_TEMP/stamp-compare.err")"
+            exit 1
+          }
+          case "$status" in
+            ahead | identical)
+              # ahead: main contains the stamp commit (maintainer work
+              # landed after the stamp push); identical: the stamp
+              # commit is main's tip.
+              echo "stamp sha ${sha} verified as ${GITHUB_REPOSITORY}@main content (compare: ${status})"
+              ;;
+            *)
+              echo "::error::stamp sha ${sha} is not on ${GITHUB_REPOSITORY}@main (compare: ${status}) — refusing the unverified checkout"
+              exit 1
+              ;;
+          esac
+
       # Pack from the stamped release commit (ADR-0572) so the manifest
       # carries the release version stamped by scripts/release-bump.sh.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -861,6 +940,45 @@ jobs:
             exit 1
           fi
           dpkg-query -W -f='ca-certificates ${Version}' ca-certificates
+      # The checkout ref below is a job output — untrusted input until
+      # proven otherwise (the CodeQL cache-poisoning alerts on this
+      # file's ffi and npm lanes). Prove it is the commit the
+      # swift-stamp job pushed to main BEFORE the checkout persists
+      # credentials or restores any cache. The release tag is cut only
+      # after every build is green (the `tag` job), so `gh api` of the
+      # tag is not yet possible; containment in branch-protected main —
+      # where only the release pipeline pushes — is the pre-tag
+      # equivalent. Least privilege: no secrets; the read-only default
+      # job token is all the check needs.
+      - name: Verify the stamp sha is trusted main content
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAMP_SHA: ${{ needs.swift-stamp.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sha="${STAMP_SHA:?swift-stamp emitted no sha}"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::malformed stamp sha '${sha}' — expected the 40-hex commit id swift-stamp pushed to main"
+            exit 1
+          fi
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${sha}...main" \
+            --jq .status 2>"$RUNNER_TEMP/stamp-compare.err")" || {
+            echo "::error::stamp sha ${sha} does not resolve against ${GITHUB_REPOSITORY} main — not the commit swift-stamp pushed: $(cat "$RUNNER_TEMP/stamp-compare.err")"
+            exit 1
+          }
+          case "$status" in
+            ahead | identical)
+              # ahead: main contains the stamp commit (maintainer work
+              # landed after the stamp push); identical: the stamp
+              # commit is main's tip.
+              echo "stamp sha ${sha} verified as ${GITHUB_REPOSITORY}@main content (compare: ${status})"
+              ;;
+            *)
+              echo "::error::stamp sha ${sha} is not on ${GITHUB_REPOSITORY}@main (compare: ${status}) — refusing the unverified checkout"
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.swift-stamp.outputs.sha }}
@@ -929,6 +1047,45 @@ jobs:
             exit 1
           fi
           dpkg-query -W -f='ca-certificates ${Version}' ca-certificates
+      # The checkout ref below is a job output — untrusted input until
+      # proven otherwise (the CodeQL cache-poisoning alerts on this
+      # file's ffi and npm lanes). Prove it is the commit the
+      # swift-stamp job pushed to main BEFORE the checkout persists
+      # credentials or restores any cache. The release tag is cut only
+      # after every build is green (the `tag` job), so `gh api` of the
+      # tag is not yet possible; containment in branch-protected main —
+      # where only the release pipeline pushes — is the pre-tag
+      # equivalent. Least privilege: no secrets; the read-only default
+      # job token is all the check needs.
+      - name: Verify the stamp sha is trusted main content
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAMP_SHA: ${{ needs.swift-stamp.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sha="${STAMP_SHA:?swift-stamp emitted no sha}"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::malformed stamp sha '${sha}' — expected the 40-hex commit id swift-stamp pushed to main"
+            exit 1
+          fi
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${sha}...main" \
+            --jq .status 2>"$RUNNER_TEMP/stamp-compare.err")" || {
+            echo "::error::stamp sha ${sha} does not resolve against ${GITHUB_REPOSITORY} main — not the commit swift-stamp pushed: $(cat "$RUNNER_TEMP/stamp-compare.err")"
+            exit 1
+          }
+          case "$status" in
+            ahead | identical)
+              # ahead: main contains the stamp commit (maintainer work
+              # landed after the stamp push); identical: the stamp
+              # commit is main's tip.
+              echo "stamp sha ${sha} verified as ${GITHUB_REPOSITORY}@main content (compare: ${status})"
+              ;;
+            *)
+              echo "::error::stamp sha ${sha} is not on ${GITHUB_REPOSITORY}@main (compare: ${status}) — refusing the unverified checkout"
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.swift-stamp.outputs.sha }}
