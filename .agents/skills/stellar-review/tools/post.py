@@ -100,12 +100,15 @@ def gh(*args: str, input_path: str | None = None) -> str:
     return out.stdout.decode()
 
 
-def find_summary_comment(repo: str, pr: str) -> dict | None:
+def find_summary_comment(repo: str, pr: str, marker: str = SUMMARY_MARKER) -> dict | None:
+    """The bot's own summary comment carrying `marker` (the stellar
+    marker by default; the per-kind posters pass their kind's — one
+    discovery implementation for every review lane)."""
     raw = gh(f"repos/{repo}/issues/{pr}/comments", "--paginate")
     comments = json.loads(raw)
     mine = [
         c for c in comments
-        if c["user"]["login"] == "github-actions[bot]" and SUMMARY_MARKER in c.get("body", "")
+        if c["user"]["login"] == "github-actions[bot]" and marker in c.get("body", "")
     ]
     mine.sort(key=lambda c: c["created_at"])
     return mine[-1] if mine else None
@@ -577,12 +580,16 @@ def tempfile_payload(doc: dict) -> str:
     return path
 
 
-def upsert_summary(repo: str, pr: str, body: str) -> None:
+def upsert_summary(repo: str, pr: str, body: str, marker: str = SUMMARY_MARKER) -> None:
     """The one summary-comment choreography: discover-then-edit, so the PR
-    keeps exactly one stellar summary. When the new body carries no ledger
-    block of its own (noop/fail summaries), the old block is carried
-    forward — dropping it would wipe sealed-unit state and human waivers."""
-    existing = find_summary_comment(repo, pr)
+    keeps exactly one summary per review lane (the stellar marker by
+    default; the per-kind posters pass their kind's). When the new body
+    carries no ledger block of its own (noop/fail summaries), the old
+    block is carried forward — dropping it would wipe sealed-unit state
+    and human waivers. The carry is stellar's own policy and a no-op for
+    a per-kind comment: those never legitimately hold a ledger block, so
+    last_ledger finds none."""
+    existing = find_summary_comment(repo, pr, marker)
     if existing and not LEDGER_RE.search(body):
         # carry the old block forward, re-encoded to canonical z: form
         # (never verbatim) — dropping it would wipe sealed-unit state
@@ -650,15 +657,17 @@ def write_verdict(path: str, verdict: str) -> None:
 
 
 def land_round(repo: str, pr: str, summary: str, verdict: str,
-               verdict_file: str) -> None:
+               verdict_file: str, marker: str = SUMMARY_MARKER) -> None:
     """The one posting choreography for every summary-carrying command
-    (LABS-615): upsert the summary, then write the verdict. A dead
-    upsert must not cost the round its findings OR green the gate — the
-    built summary goes to the run log, the verdict is forced to fail
-    (tier 1 of the enforce gate would otherwise trust the verdict file
-    alone), and the error re-raises so the step stays red."""
+    (LABS-615), shared by the stellar commands and the per-kind posters
+    (`marker` selects which lane's summary is discovered): upsert the
+    summary, then write the verdict. A dead upsert must not cost the
+    round its findings OR green the gate — the built summary goes to the
+    run log, the verdict is forced to fail (tier 1 of the enforce gate
+    would otherwise trust the verdict file alone), and the error
+    re-raises so the step stays red."""
     try:
-        upsert_summary(repo, pr, summary)
+        upsert_summary(repo, pr, summary, marker)
     except subprocess.CalledProcessError:
         print("post: summary upsert failed; round summary follows "
               "(verdict forced to fail)", file=sys.stderr)
