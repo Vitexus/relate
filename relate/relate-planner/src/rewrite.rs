@@ -68,29 +68,28 @@ fn push_match_where_down(clauses: &mut [Clause]) -> Vec<Vec<String>> {
     let mut bound = HashSet::new();
     let mut i = 0;
     while i < n {
-        if !crossing[i] {
-            let names = bindings_of(&clauses[i], &scope);
-            advance_scope(&mut scope, &mut bound, &clauses[i], &names);
-            introduced.push(names);
-            i += 1;
-            continue;
-        }
-        // A run of crossing MATCHes: park its conjuncts first, each with
-        // its variable set computed once (source clause, position in its
-        // conjunct list, that set), then walk the run once, advancing the
-        // one binding set.
+        // The walk is carved into segments: a run of crossing MATCHes, or
+        // any other clause as a one-clause segment with nothing parked.
+        // One advance site and one placement site serve both.
         let start = i;
+        // A crossing run parks its conjuncts first, each with its variable
+        // set computed once (source clause, position in its conjunct list,
+        // that set), then the segment walk advances the one binding set.
         let mut pending: Vec<(usize, usize, HashSet<String>)> = Vec::new();
-        while i < n && crossing[i] {
-            let conjuncts = crate::order::where_conjuncts_of(
-                crossing_where(&clauses[i]).and_then(Option::as_ref),
-            );
-            assignment[i] = vec![None; conjuncts.len()];
-            for (slot, conjunct) in conjuncts.into_iter().enumerate() {
-                let mut vars = HashSet::new();
-                relate_ir::expr_vars(conjunct, &mut vars);
-                pending.push((i, slot, vars));
+        if crossing[i] {
+            while i < n && crossing[i] {
+                let conjuncts = crate::order::where_conjuncts_of(
+                    crossing_where(&clauses[i]).and_then(Option::as_ref),
+                );
+                assignment[i] = vec![None; conjuncts.len()];
+                for (slot, conjunct) in conjuncts.into_iter().enumerate() {
+                    let mut vars = HashSet::new();
+                    relate_ir::expr_vars(conjunct, &mut vars);
+                    pending.push((i, slot, vars));
+                }
+                i += 1;
             }
+        } else {
             i += 1;
         }
         for e in start..i {

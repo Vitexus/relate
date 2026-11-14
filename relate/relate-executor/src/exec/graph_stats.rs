@@ -189,10 +189,8 @@ impl relate_planner::PatternStats for GraphStats<'_> {
     /// LABS-991: the live histograms' any-label tail.
     fn any_degree_tail(&self, rel_type: Option<&SmallName>) -> Option<u64> {
         match rel_type {
-            Some(rel_type) => {
-                rel_type.with_str(|text| self.graph.pattern_any_degree_tail(Some(text)))
-            }
-            None => self.graph.pattern_any_degree_tail(None),
+            Some(rel_type) => rel_type.with_str(|text| self.graph.pattern_type_degree_tail(text)),
+            None => self.graph.pattern_any_degree_tail(),
         }
     }
 

@@ -139,9 +139,11 @@ fn is_float_literal(expr: &Expr) -> bool {
 /// into a unary sign over the literal, and both spellings are the mistake
 /// Neo4j's static FLOAT gate rejects at compile time (22N27 / 22NB1).
 /// Constant float *expressions* (`0.0/0.0`, `head([1.0, 'x'])`, …) are
-/// not literals and are handled at runtime; the wording here is
-/// plan-time-only, since those sites' runtime coercion truncates floats
-/// (NaN → 0, saturating) and raises `NumberOutOfRange` instead.
+/// not literals and are handled at runtime, and the two sites differ
+/// there: a list index rejects every float at runtime with the same text
+/// this gate raises, while a slice bound's wording is plan-time-only — its
+/// runtime coercion truncates floats (NaN → 0, saturating) and raises
+/// `NumberOutOfRange` outside the int32 range instead.
 pub(crate) fn float_integer_site(expr: &Expr) -> Option<&'static IntegerArgSite> {
     match expr {
         Expr::Subscript { index, .. } if is_float_literal(index) => Some(&integer_args::LIST_INDEX),
@@ -152,6 +154,16 @@ pub(crate) fn float_integer_site(expr: &Expr) -> Option<&'static IntegerArgSite>
             Some(&integer_args::SLICE_END)
         }
         _ => None,
+    }
+}
+
+/// ADR-0175: reject a float literal at the integer site `expr` carries,
+/// naming that site's authored detail ([`float_integer_site`] owns the
+/// list).
+pub(super) fn reject_float_integer_site(expr: &Expr) -> Result<()> {
+    match float_integer_site(expr) {
+        Some(site) => Err(Error::invalid_argument_type(site.type_error)),
+        None => Ok(()),
     }
 }
 
