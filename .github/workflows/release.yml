@@ -578,19 +578,29 @@ jobs:
         with:
           ref: ${{ needs.swift-stamp.outputs.sha }}
 
-      # Shared Rust preamble (sccache + rust-cache; the preamble's
-      # internal dtolnay@rev is the rust-toolchain.toml sync point, and
-      # toolchain-targets carries this leg's target). Every leg
-      # cold-compiled the full dependency tree per release before this;
-      # sccache makes those compiles content-addressed hits on the
-      # macOS/Windows legs too — the release poles — where a rust-cache
-      # restore alone is mtime-invalidated on a fresh checkout
-      # (ADR-0331; docs/testing/build-caches.md, "Release workflow
-      # lanes"). free-disk and mold stay at their defaults (Linux-only
-      # effects inside the action).
+      # Rust preamble, cache-free (the preamble's internal dtolnay@rev
+      # is the rust-toolchain.toml sync point, and toolchain-targets
+      # carries this leg's target). This lane builds from the stamp
+      # ref — the privileged checkout the gate above verified — and
+      # executes that tree's code (the install scripts below, the
+      # build, every dependency's build script), so it restores and
+      # saves nothing in the shared caches: no rust-cache (any CI lane
+      # saves entries under the same key) and no sccache GHA writes.
+      # Cross-run cache state must neither feed the release artifacts
+      # nor be left behind by a build that just ran stamp-ref code —
+      # the cache-poisoning vehicle the CodeQL alerts on this lane
+      # name. Trade-off, accepted: the pre-cache status quo — every
+      # leg cold-compiles the full dependency tree each release
+      # (measured cold release poles: CLI windows 15.9 min, wheels
+      # 14.6 min; docs/testing/build-caches.md, "Release workflow
+      # lanes"), paid once per manual release dispatch. The other release compile
+      # lanes (xcframework, swift-stamp from the bump commit; cli; the
+      # wheel legs) keep their caches. free-disk and mold stay at
+      # their defaults (Linux-only effects inside the action).
       - uses: ./.github/actions/setup-rust-ci
         with:
-          sccache: "true"
+          sccache: "false"
+          cache: "false"
           toolchain-targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools (Linux ARM64)
