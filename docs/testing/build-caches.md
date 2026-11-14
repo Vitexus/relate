@@ -282,19 +282,27 @@ cold-compiled the full dependency tree per release.
   legs stay cold every release. The `version` job itself compiles
   nothing since the ADR-0572 split (bump and push only, ubuntu).
 - The `ffi` job is the exception among the compile lanes: it builds
-  from the stamped release commit, so it runs the preamble cache-free
-  (`cache: "false"`, `sccache: "false"`) — a stamp-ref build must
-  neither restore cross-run state into the release artifacts nor save
-  cache entries written under code it just executed (the
-  cache-poisoning vehicle; the npm lanes beside it consume no cache
-  either). The cost is the pre-cache cold shape above, paid once per
-  release dispatch.
+  from the stamped release commit, so it runs the preamble's
+  toolchain-only core (`setup-rust-ci-core`) instead of the
+  cache-carrying `setup-rust-ci` wrapper — the core contains no cache
+  step of any kind (no rust-cache, no actions/cache, no sccache
+  setup), so the lane's static call graph cannot restore or save
+  cross-run state at all; turning the wrapper off per input would
+  leave the cache steps reachable to the CodeQL cache-poisoning
+  model, which reads the step graph, not input values. A stamp-ref
+  build must neither restore cross-run state into the release
+  artifacts nor save cache entries written under code it just
+  executed (the cache-poisoning vehicle; the npm lanes beside it
+  consume no cache either). The cost is the pre-cache cold shape
+  above, paid once per release dispatch.
 - The wheel legs pass maturin-action's own `sccache: true` instead of
   the host preamble: the linux legs build inside manylinux containers a
   host-side `RUSTC_WRAPPER` never reaches, and the action wires the GHA
   backend through in both shapes.
 - The wasm package job stays uncached, mirroring the CI `wasm` lane; at
-  ~2 min it is not a pole.
+  ~2 min it is not a pole. Its toolchain comes through the same
+  toolchain-only core (free-disk and mold off, the exact step set it
+  ran before the split), so its call graph is cache-free too.
 - First release after the change pays the cache fill; the wins land from
   the second release onward (each release's `Cargo.lock` version bump
   rotates the rust-cache lock-hash — the stale-generation restore plus
