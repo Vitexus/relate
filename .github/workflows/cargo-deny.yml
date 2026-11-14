@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 env:
-  # The cargo-deny release asset and its .sha256 sidecar come through
+  # The cargo-deny release asset comes through
   # scripts/github-download.sh, which requires a token in Actions so the
   # download is not anonymous. The job token is not in the environment
   # unless named here.
@@ -48,3 +48,11 @@ jobs:
 
       - name: Scan Cargo.lock against the RustSec advisory database
         run: cargo deny check advisories
+
+      # An expired ignore entry is a re-triage prompt, not a standing
+      # accept (deny.toml [advisories] header) — cargo-deny 0.20.x
+      # cannot see the expiry comments its config rides, so this step
+      # enforces them: any entry past its date fails the run here,
+      # after the scan has reported the advisory state it suppressed.
+      - name: Fail on past-due deny.toml ignore entries
+        run: python3 scripts/check_deny_expiry.py

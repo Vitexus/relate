@@ -582,6 +582,20 @@ test-adr-scripts:
 test-rename-residuals:
 	$(PYTHON) $(CURDIR)/scripts/tests/test_rename_residuals.py
 
+## test-deny-expiry: The deny.toml ignore-expiry policy
+##   (scripts/check_deny_expiry.py): every ignore entry carries an
+##   unexpired # expiry comment — the same checker the weekly
+##   cargo-deny workflow runs after the scan
+test-deny-expiry:
+	$(PYTHON) $(CURDIR)/scripts/tests/test_check_deny_expiry.py
+
+## test-docker-tool-pins: The Dockerfile chef stage's pinned build-tool
+##   versions equal the installer scripts' (scripts/install-sccache.sh,
+##   scripts/install-cargo-auditable.sh) — the two lanes' version drift
+##   guard
+test-docker-tool-pins:
+	$(PYTHON) $(CURDIR)/scripts/tests/test_docker_tool_pins.py
+
 ## test-bolt-compat-scripts: Unit-test the Bolt compat probe's framing,
 ##   masking, selectors, transcript rendering, manifest decode and findings
 ##   catalog (scripts/bolt_compat_probe.py and its modules)
@@ -674,7 +688,8 @@ test-scripts: test-compare-loadtest test-install-sh test-stage-setup-scripts \
 	test-baseline-scripts test-bolt-compat-scripts test-adr-scripts \
 	test-release-scripts test-front-bench-scripts test-opencode-review-post \
 	test-stamp-swift-package \
-	test-build-xcframework test-rename-residuals test-makefile-targets test-premerge-check
+	test-build-xcframework test-rename-residuals test-makefile-targets test-premerge-check \
+	test-deny-expiry test-docker-tool-pins
 
 VERSION ?= $(shell sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
 
