@@ -578,33 +578,29 @@ jobs:
         with:
           ref: ${{ needs.swift-stamp.outputs.sha }}
 
-      # Rust preamble, cache-free (the core's internal dtolnay@rev is
-      # the rust-toolchain.toml sync point, and toolchain-targets
+      # Rust preamble, cache-free (the preamble's internal dtolnay@rev
+      # is the rust-toolchain.toml sync point, and toolchain-targets
       # carries this leg's target). This lane builds from the stamp
       # ref — the privileged checkout the gate above verified — and
       # executes that tree's code (the install scripts below, the
-      # build, every dependency's build script), so its static call
-      # graph must contain no cache step of any kind: it calls the
-      # toolchain-only core (setup-rust-ci-core — toolchain, free-disk,
-      # mold; no rust-cache, no actions/cache, no sccache setup)
-      # directly, never the cache-carrying setup-rust-ci wrapper, so
-      # nothing that saves or restores cross-run state is reachable
-      # after the checkout — the static model reads the step graph,
-      # not a wrapper input, so an input-turned-off cache step would
-      # still leave the CodeQL cache-poisoning alert standing. The
-      # runtime gate above stays the real defense against a forged
-      # stamp sha; this split removes the cache-poisoning vehicle the
-      # alerts named. Trade-off, accepted: the pre-cache status quo —
-      # every leg cold-compiles the full dependency tree each release
+      # build, every dependency's build script), so it restores and
+      # saves nothing in the shared caches: no rust-cache (any CI lane
+      # saves entries under the same key) and no sccache GHA writes.
+      # Cross-run cache state must neither feed the release artifacts
+      # nor be left behind by a build that just ran stamp-ref code —
+      # the cache-poisoning vehicle the CodeQL alerts on this lane
+      # name. Trade-off, accepted: the pre-cache status quo — every
+      # leg cold-compiles the full dependency tree each release
       # (measured cold release poles: CLI windows 15.9 min, wheels
       # 14.6 min; docs/testing/build-caches.md, "Release workflow
       # lanes"), paid once per manual release dispatch. The other release compile
       # lanes (xcframework, swift-stamp from the bump commit; cli; the
-      # wheel legs) keep their caches through the wrapper. free-disk
-      # and mold stay at their defaults (Linux-only effects inside the
-      # core).
-      - uses: ./.github/actions/setup-rust-ci-core
+      # wheel legs) keep their caches. free-disk and mold stay at
+      # their defaults (Linux-only effects inside the action).
+      - uses: ./.github/actions/setup-rust-ci
         with:
+          sccache: "false"
+          cache: "false"
           toolchain-targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools (Linux ARM64)
@@ -997,18 +993,13 @@ jobs:
         with:
           ref: ${{ needs.swift-stamp.outputs.sha }}
 
-      # Toolchain through the toolchain-only core (the core's internal
-      # dtolnay@rev is the rust-toolchain.toml sync point), the same
-      # cache-free half the ffi lane takes: this job builds from the
-      # stamp ref, so its call graph must contain no cache step of any
-      # kind, and the core has none — no rust-cache, no actions/cache,
-      # no sccache setup. free-disk and mold stay off exactly as
-      # before (one small cdylib; the CI wasm lane's shape).
-      - uses: ./.github/actions/setup-rust-ci-core
+      # Keep @rev in sync with rust-toolchain.toml (channel = "1.88.0"):
+      # the action installs the toolchain named by @rev, including any
+      # components/targets; @stable would put them on a toolchain nothing
+      # uses because cargo resolves rust-toolchain.toml instead.
+      - uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759 # 1.88.0
         with:
-          free-disk: "false"
-          mold: "false"
-          toolchain-targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
