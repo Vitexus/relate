@@ -240,10 +240,10 @@ class TestLedgerBlob(unittest.TestCase):
 
 
 class TestUpsertSummary(unittest.TestCase):
-    def _run(self, body, existing_body):
+    def _run(self, body, existing_body, **kw):
         sink = []
         with patched_post_gh(recording_gh(sink), {"id": 7, "body": existing_body}):
-            post.upsert_summary("o/r", "1", body)
+            post.upsert_summary("o/r", "1", body, **kw)
         return [endpoint for endpoint, _ in sink], sink[-1][1]["body"]
 
     def test_body_without_ledger_carries_old_block_forward(self):
@@ -262,6 +262,50 @@ class TestUpsertSummary(unittest.TestCase):
         _, body = self._run(f"new\n<!-- stellar-ledger: {new_blob} -->\n", existing)
         self.assertIn(new_blob, body)
         self.assertNotIn('"rounds":1', body)
+
+    def test_declined_carry_is_the_lane_boundary(self):
+        # the explicit carry boundary: the per-kind lanes own no ledger
+        # state, so they decline the carry — no stellar policy runs on
+        # their path, whatever the discovered comment happened to hold
+        blob = '{"version":1,"rounds":2,"units":{"a::b":"h:s"},"findings":{}}'
+        existing = f"old summary\n<!-- stellar-ledger: {blob} -->\n"
+        calls, body = self._run("new summary\n", existing,
+                                marker="**Rust review:**", carry_ledger=False)
+        self.assertNotIn("stellar-ledger", body)
+        self.assertEqual(calls[0], "repos/o/r/issues/comments/7")
+
+
+class TestFindSummaryComment(unittest.TestCase):
+    """Discovery matches the marker the way the enforce gate's tier 3
+    parses it: at the start of a line. A marker quoted mid-sentence in
+    model prose (routine when a stellar review quotes these very
+    scripts) is not a summary claim — the rust upsert must never PATCH
+    the stellar summary that quoted it."""
+
+    def _find(self, bodies, marker=None):
+        comments = [
+            {"user": {"login": "github-actions[bot]"}, "body": body,
+             "created_at": f"2024-01-0{i + 1}T00:00:00Z"}
+            for i, body in enumerate(bodies)
+        ]
+        orig = post.gh
+        post.gh = lambda *a, input_path=None: json.dumps(comments)
+        try:
+            return post.find_summary_comment(
+                "o/r", "1", **({"marker": marker} if marker else {}))
+        finally:
+            post.gh = orig
+
+    def test_marker_at_line_start_is_discovered(self):
+        found = self._find(["some analysis prose\n**Rust review:** ✅ no issues found\n"],
+                           marker="**Rust review:**")
+        self.assertIsNotNone(found)
+        self.assertIn("no issues found", found["body"])
+
+    def test_marker_quoted_mid_sentence_is_not_a_summary(self):
+        found = self._find(["the rendered line `**Rust review:**` was quoted here\n"],
+                           marker="**Rust review:**")
+        self.assertIsNone(found)
 
 
 class PostHarnessMixin:
