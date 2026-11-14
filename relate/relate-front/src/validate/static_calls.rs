@@ -17,16 +17,14 @@
 use relate_core::{builtin_arity, Value};
 use relate_error::{EngineError, ErrorKind};
 use relate_model::VectorCoordToken;
-use relate_parser::{
-    Clause, Concurrency, Expr, FunctionCallExpr, LiteralValue, PathCount, PathSelector,
-};
+use relate_parser::{Clause, Concurrency, Expr, FunctionCallExpr, PathCount, PathSelector};
 
-use crate::ast::tree::{walk_clause_list_tree, SubqueryDescent};
+use crate::ast::tree::{unparen, walk_clause_list_tree, SubqueryDescent};
 
 use super::static_arithmetic::expr_is_bare_var;
 use super::static_literal::{
-    non_numeric_leaf_class, require_integer_argument, require_static_type, static_literal_type,
-    static_value, unparen, StaticLitType,
+    non_numeric_leaf_class, require_integer_argument, require_static_type, static_int_value,
+    static_literal_type, static_string_value, StaticLitType, INTEGER_ONLY, INTEGER_OR_NULL,
 };
 use super::static_types::is_statically_non_boolean;
 
@@ -92,7 +90,7 @@ fn check_concurrency(concurrency: &Concurrency) -> Result<(), EngineError> {
         return Ok(());
     };
     // A null concurrency is rejected here too: CIP-34's value is an integer.
-    require_integer_argument(expr, "concurrency", false)
+    require_integer_argument(expr, "concurrency", INTEGER_ONLY)
 }
 
 /// The per-node visitor for [`validate_static_call_types`].
@@ -116,7 +114,7 @@ fn check_static_function_call(fc: &FunctionCallExpr) -> Result<(), EngineError> 
             require_vector_operand(&fc.args[0], &name)?;
             require_vector_operand(&fc.args[1], &name)
         }
-        "char_length" | "character_length" => check_string_argument(&fc.args, "char_length()"),
+        "char_length" | "character_length" => check_string_argument(&fc.args, &format!("{name}()")),
         // Arity alone: the contract above owns the count and its message.
         "nullif" | "format" => Ok(()),
         "replace" => check_replace_limit(&fc.args),
@@ -150,16 +148,19 @@ fn check_builtin_arity(name: &str, args: &[Expr]) -> Result<(), EngineError> {
 /// function; the parser produces the coordinate type as a literal string, so
 /// its vocabulary is the other static fact here.
 fn check_vector_call(args: &[Expr]) -> Result<(), EngineError> {
-    if let Expr::Literal(LiteralValue::String(coord)) = unparen(&args[2]) {
-        if relate_model::VectorCoordKind::from_alias(coord).is_none() {
+    let [list, dimension_arg, coordinate_type]: &[Expr; 3] = args
+        .try_into()
+        .expect("check_builtin_arity admitted exactly three vector() arguments");
+    if let Some(coord) = static_string_value(coordinate_type) {
+        if relate_model::VectorCoordKind::from_alias(&coord).is_none() {
             return Err(EngineError::semantic(
                 ErrorKind::InvalidArgumentType,
                 format!("Invalid vector inner type: {coord}"),
             ));
         }
     }
-    require_integer_argument(&args[1], "vector() dimension", true)?;
-    if let Some(dimension) = static_int_value(&args[1]) {
+    require_integer_argument(dimension_arg, "vector() dimension", INTEGER_OR_NULL)?;
+    if let Some(dimension) = static_int_value(dimension_arg) {
         if !relate_model::VECTOR_DIMENSION_RANGE.contains(&dimension) {
             return Err(EngineError::semantic(
                 ErrorKind::NumberOutOfRange,
@@ -170,9 +171,9 @@ fn check_vector_call(args: &[Expr]) -> Result<(), EngineError> {
             ));
         }
     }
-    match static_literal_type(&args[0]) {
+    match static_literal_type(list) {
         Some(StaticLitType::String) => {
-            if let Some(text) = static_string_value(&args[0]) {
+            if let Some(text) = static_string_value(list) {
                 if coordinate_text_is_malformed(&text) {
                     return Err(EngineError::semantic(
                         ErrorKind::InvalidArgumentType,
@@ -182,7 +183,7 @@ fn check_vector_call(args: &[Expr]) -> Result<(), EngineError> {
             }
             Ok(())
         }
-        Some(StaticLitType::List) => require_numeric_list_elements(&args[0], "vector()"),
+        Some(StaticLitType::List) => require_numeric_list_elements(list, "vector()"),
         None | Some(StaticLitType::Null) => Ok(()),
         Some(ty) => Err(EngineError::semantic(
             ErrorKind::InvalidArgumentType,
@@ -296,12 +297,17 @@ fn check_temporal_call(args: &[Expr]) -> Result<(), EngineError> {
 /// the init expression.
 fn check_all_reduce(r: &relate_parser::AllReduceExpr) -> Result<(), EngineError> {
     require_list_operand(&r.list_expr, "allReduce()")?;
+    // A predicate that is the accumulator itself has the init expression's
+    // static type: resolve the effective predicate once.
     let predicate_is_accumulator = r
         .accumulator
         .with_str(|name| expr_is_bare_var(&r.predicate, name));
-    if is_statically_non_boolean(&r.predicate)
-        || (predicate_is_accumulator && is_statically_non_boolean(&r.init_expr))
-    {
+    let effective_predicate = if predicate_is_accumulator {
+        &r.init_expr
+    } else {
+        &r.predicate
+    };
+    if is_statically_non_boolean(effective_predicate) {
         return Err(EngineError::semantic(
             ErrorKind::InvalidArgumentType,
             "allReduce() predicate must be boolean".to_string(),
@@ -314,20 +320,6 @@ fn require_list_operand(expr: &Expr, what: &str) -> Result<(), EngineError> {
     require_static_type(expr, &[StaticLitType::List, StaticLitType::Null], |ty| {
         format!("{what} needs a list, got {}", ty.name())
     })
-}
-
-fn static_int_value(expr: &Expr) -> Option<i64> {
-    match static_value(expr)? {
-        Value::Int(value) => Some(value),
-        _ => None,
-    }
-}
-
-fn static_string_value(expr: &Expr) -> Option<String> {
-    match static_value(expr)? {
-        Value::String(value) => Some(value.to_string()),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -454,6 +446,18 @@ mod tests {
                 "InvalidNumberOfArguments: function requires one argument",
                 "{query}"
             );
+        }
+    }
+
+    /// The rejection names the spelling the call was made with.
+    #[test]
+    fn string_argument_rejection_names_the_called_spelling() {
+        for (query, spelling) in [
+            ("RETURN char_length(42)", "char_length()"),
+            ("RETURN character_length(42)", "character_length()"),
+        ] {
+            let err = parse_and_check_static_calls(query).unwrap_err();
+            assert!(err.to_string().contains(spelling), "{query}: {err}");
         }
     }
 

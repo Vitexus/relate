@@ -309,21 +309,17 @@ fn walk_clause_operands(clauses: &[Clause], env: &mut OperandEnv<'_>) -> Result<
     for clause in clauses {
         match clause {
             Clause::Match(mc) => {
-                for path in &mc.pattern {
-                    check_path_operands(path, env)?;
-                }
+                check_pattern_operands(&mc.pattern, env)?;
                 // A pattern's own variables are entities (or fresh), so
                 // their operand types are unknown from here on.
                 rebind_paths(&mc.pattern, env);
             }
             Clause::Create(cc) => {
-                for path in &cc.pattern {
-                    check_path_operands(path, env)?;
-                }
+                check_pattern_operands(&cc.pattern, env)?;
                 rebind_paths(&cc.pattern, env);
             }
             Clause::Merge(mc) => {
-                check_path_operands(&mc.pattern, env)?;
+                check_pattern_operands(std::slice::from_ref(&mc.pattern), env)?;
                 for item in mc.on_create.iter().chain(&mc.on_match) {
                     check_set_item_operands(item, env)?;
                 }
@@ -443,11 +439,12 @@ fn check_label_operands(label: &LabelExpr, env: &OperandEnv<'_>) -> Result<(), E
     })
 }
 
-fn check_path_operands(path: &PatternPath, env: &OperandEnv<'_>) -> Result<(), EngineError> {
-    for element in &path.elements {
-        check_element_operands(element, env)?;
-    }
-    Ok(())
+/// One clause's pattern paths: every element's label/type operands, in order.
+fn check_pattern_operands(paths: &[PatternPath], env: &OperandEnv<'_>) -> Result<(), EngineError> {
+    paths
+        .iter()
+        .flat_map(|path| &path.elements)
+        .try_for_each(|element| check_element_operands(element, env))
 }
 
 fn check_element_operands(

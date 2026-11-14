@@ -445,14 +445,14 @@ fn walk_set_item_exprs_tree(
     // place.
     if let Some((target, _)) = &item.labels_function {
         walk_expr_at(target, depths, walk)?;
-        if let Some(value) = &item.value {
-            (walk.operand)(value, DynamicNameToken::Label)?;
-        }
     }
     for label in &item.labels {
         walk_label_expr_tree(label, depths, walk, LabelSite::PatternOrWrite)?;
     }
     if let Some(v) = &item.value {
+        if item.labels_function.is_some() {
+            (walk.operand)(v, DynamicNameToken::Label)?;
+        }
         walk_expr_at(v, depths, walk)?;
     }
     Ok(())
@@ -483,34 +483,22 @@ fn walk_element_exprs_tree(
     walk: &mut TreeWalk<'_, '_>,
 ) -> Result<(), EngineError> {
     match elem {
-        PatternElement::Node(np) => {
-            if let Some(le) = &np.label_expr {
-                walk_label_expr_tree(le, depths, walk, LabelSite::PatternOrWrite)?;
-            }
-            for (_, v) in &np.properties {
-                walk_expr_at(v, depths, walk)?;
-            }
-            if let Some(p) = &np.properties_param {
-                walk_expr_at(p, depths, walk)?;
-            }
-            if let Some(w) = &np.where_expr {
-                walk_expr_at(w, depths, walk)?;
-            }
-        }
-        PatternElement::Relationship(rp) => {
-            if let Some(te) = &rp.type_expr {
-                walk_label_expr_tree(te, depths, walk, LabelSite::PatternOrWrite)?;
-            }
-            for (_, v) in &rp.properties {
-                walk_expr_at(v, depths, walk)?;
-            }
-            if let Some(p) = &rp.properties_param {
-                walk_expr_at(p, depths, walk)?;
-            }
-            if let Some(w) = &rp.where_expr {
-                walk_expr_at(w, depths, walk)?;
-            }
-        }
+        PatternElement::Node(np) => walk_element_fields_tree(
+            np.label_expr.as_ref(),
+            &np.properties,
+            np.properties_param.as_ref(),
+            np.where_expr.as_ref(),
+            depths,
+            walk,
+        )?,
+        PatternElement::Relationship(rp) => walk_element_fields_tree(
+            rp.type_expr.as_ref(),
+            &rp.properties,
+            rp.properties_param.as_ref(),
+            rp.where_expr.as_ref(),
+            depths,
+            walk,
+        )?,
         PatternElement::Quantified(qpp) => {
             for inner in &qpp.elements {
                 walk_element_exprs_tree(inner, depths, walk)?;
@@ -519,6 +507,37 @@ fn walk_element_exprs_tree(
                 walk_expr_at(w, depths, walk)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Strip wrapping parentheses.
+pub(crate) fn unparen(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Paren(inner) => unparen(inner),
+        other => other,
+    }
+}
+
+/// The four-field descent a node and a relationship element share: the
+/// label (node) or type (relationship) expression, the property entries,
+/// the whole-map `$param`, and the element `WHERE`.
+fn walk_element_fields_tree(
+    label_expr: Option<&relate_parser::LabelExpr>,
+    properties: &[(relate_names::SmallName, Expr)],
+    properties_param: Option<&Expr>,
+    where_expr: Option<&Expr>,
+    depths: Depths,
+    walk: &mut TreeWalk<'_, '_>,
+) -> Result<(), EngineError> {
+    if let Some(label) = label_expr {
+        walk_label_expr_tree(label, depths, walk, LabelSite::PatternOrWrite)?;
+    }
+    for (_, value) in properties {
+        walk_expr_at(value, depths, walk)?;
+    }
+    for expr in properties_param.into_iter().chain(where_expr) {
+        walk_expr_at(expr, depths, walk)?;
     }
     Ok(())
 }

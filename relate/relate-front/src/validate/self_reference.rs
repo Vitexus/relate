@@ -415,8 +415,9 @@ impl ReadCollector {
             }
             Clause::CallSubquery(subquery) => self.clause_list(&subquery.statement.clauses),
             Clause::Conditional(conditional) => {
+                // The branch predicates are clause expression roots, already
+                // read by `clause_list`'s root walk; only the bodies remain.
                 for branch in &conditional.branches {
-                    self.expr(&branch.predicate)?;
                     self.clause_list(&branch.body.clauses)?;
                 }
                 if let Some(else_body) = &conditional.else_body {

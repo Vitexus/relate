@@ -40,11 +40,11 @@ pub fn validate_clause_slots(clauses: &[Clause]) -> Result<(), EngineError> {
     for clause in clauses {
         match clause {
             Clause::Unwind(unwind) => {
-                reject_aggregate_in(Some(&unwind.expr), "an UNWIND source")?;
+                reject_aggregate_in(&unwind.expr, "an UNWIND source")?;
             }
             Clause::Conditional(conditional) => {
                 for branch in &conditional.branches {
-                    reject_aggregate_in(Some(&branch.predicate), "a WHEN predicate")?;
+                    reject_aggregate_in(&branch.predicate, "a WHEN predicate")?;
                 }
             }
             _ => {}
@@ -59,25 +59,23 @@ pub fn validate_expression_slots(expr: &Expr) -> Result<(), EngineError> {
     match expr {
         Expr::ListComprehension(comprehension) => {
             let slot = "a list comprehension";
-            reject_aggregate_in(comprehension.map_expr.as_ref(), slot)?;
-            reject_aggregate_in(comprehension.where_expr.as_ref(), slot)
+            reject_optional_aggregate_in(comprehension.map_expr.as_ref(), slot)?;
+            reject_optional_aggregate_in(comprehension.where_expr.as_ref(), slot)
         }
         Expr::MapComprehension(comprehension) => {
             let slot = "a map comprehension";
-            reject_aggregate_in(Some(&comprehension.key_expr), slot)?;
-            reject_aggregate_in(Some(&comprehension.value_expr), slot)?;
-            reject_aggregate_in(comprehension.where_expr.as_ref(), slot)
+            reject_aggregate_in(&comprehension.key_expr, slot)?;
+            reject_aggregate_in(&comprehension.value_expr, slot)?;
+            reject_optional_aggregate_in(comprehension.where_expr.as_ref(), slot)
         }
         Expr::Quantifier(quantifier) => {
-            reject_aggregate_in(quantifier.predicate.as_ref(), "a quantifier predicate")
+            reject_optional_aggregate_in(quantifier.predicate.as_ref(), "a quantifier predicate")
         }
-        Expr::Reduce(reduce) => {
-            reject_aggregate_in(Some(&reduce.expression), "a reduce() expression")
-        }
+        Expr::Reduce(reduce) => reject_aggregate_in(&reduce.expression, "a reduce() expression"),
         Expr::AllReduce(reduce) => {
             let slot = "a reduce() expression";
-            reject_aggregate_in(Some(&reduce.expression), slot)?;
-            reject_aggregate_in(Some(&reduce.predicate), slot)
+            reject_aggregate_in(&reduce.expression, slot)?;
+            reject_aggregate_in(&reduce.predicate, slot)
         }
         _ => Ok(()),
     }
@@ -93,12 +91,17 @@ fn reject_aggregation(context: &str) -> EngineError {
     )
 }
 
-/// Reject an aggregate anywhere in one non-aggregating slot.
-fn reject_aggregate_in(expr: Option<&Expr>, context: &str) -> Result<(), EngineError> {
-    match expr {
-        Some(expr) if contains_aggregation_anywhere(expr) => Err(reject_aggregation(context)),
-        _ => Ok(()),
+/// Reject an aggregate anywhere in one mandatory non-aggregating slot.
+fn reject_aggregate_in(expr: &Expr, context: &str) -> Result<(), EngineError> {
+    if contains_aggregation_anywhere(expr) {
+        return Err(reject_aggregation(context));
     }
+    Ok(())
+}
+
+/// [`reject_aggregate_in`] for a slot the grammar makes optional.
+fn reject_optional_aggregate_in(expr: Option<&Expr>, context: &str) -> Result<(), EngineError> {
+    expr.map_or(Ok(()), |expr| reject_aggregate_in(expr, context))
 }
 
 #[cfg(test)]

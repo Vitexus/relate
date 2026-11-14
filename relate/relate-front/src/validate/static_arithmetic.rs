@@ -11,9 +11,10 @@ use relate_names::SmallName;
 use relate_parser::{Expr, Statement};
 
 use crate::ast::collect::{walk_expr_scoped, ScopedExprVisitor};
+use crate::ast::tree::unparen;
 
 use super::static_literal::{
-    is_arithmetic_op, non_numeric_leaf_class, static_literal_type, unparen, StaticLitType,
+    is_arithmetic_op, non_numeric_leaf_class, static_literal_type, StaticLitType,
 };
 
 /// The arithmetic operators that raise a type error for *every* non-numeric,
