@@ -169,10 +169,20 @@ jobs:
       # own standalone prompt instead (the skill owns its dispatch shape,
       # and the protocol's findings-document contract does not apply
       # there).
-      - name: Load ${{ inputs.job_name }} prompt into env
+      #
+      # The prompt bytes are PR-controlled (the header and the protocol
+      # are read from the PR's own checkout), so they must never transit
+      # $GITHUB_ENV: the pre-fix heredoc write could be terminated early
+      # by a planted PROMPT_EOF line inside a prompt file, and every line
+      # after it would become an arbitrary NAME=VALUE environment write
+      # for all later steps — the token-bearing post steps included. The
+      # concatenated prompt lands in a file under RUNNER_TEMP instead
+      # (the timeout marker's channel), and only its fixed,
+      # runner-controlled path crosses the step boundary.
+      - name: Build ${{ inputs.job_name }} prompt file
         run: |
+          PROMPT_FILE="$RUNNER_TEMP/review-prompt.md"
           {
-            echo 'PROMPT<<PROMPT_EOF'
             echo "REPO: ${{ github.repository }}"
             echo "PR NUMBER: ${{ github.event.pull_request.number }}"
             echo "HEAD SHA: ${{ github.event.pull_request.head.sha }}"
@@ -182,8 +192,11 @@ jobs:
               echo
               cat .github/prompts/opencode-review-protocol.md
             fi
-            echo 'PROMPT_EOF'
-          } >> "$GITHUB_ENV"
+          } > "$PROMPT_FILE"
+          # The workflow's only $GITHUB_ENV write, and a fixed value: a
+          # planted PROMPT_EOF line in a prompt file is inert file
+          # content now — no prompt byte reaches any step's environment.
+          echo "PROMPT_FILE=$PROMPT_FILE" >> "$GITHUB_ENV"
 
       - name: Run OpenCode (${{ inputs.job_name }} review)
         # The pre-steps skip the model when the deterministic gate already
@@ -233,11 +246,14 @@ jobs:
         # kill-after, and the authoritative marker write.
         timeout-minutes: ${{ inputs.review_timeout_minutes }}
         run: |
+          # The prompt itself never travels through the environment: the
+          # build step above left the full text in $PROMPT_FILE, and it
+          # is read straight into the invocation's argv here.
           MARKER="$RUNNER_TEMP/review_timed_out"
           set +e
           timeout --signal=INT --kill-after=60s \
             "$((REVIEW_TIMEOUT_MINUTES - 3))m" \
-            opencode run --model "$OPENCODE_REVIEW_MODEL" "$PROMPT"
+            opencode run --model "$OPENCODE_REVIEW_MODEL" "$(cat "$PROMPT_FILE")"
           code=$?
           set -e
           if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
