@@ -1,0 +1,30 @@
+#!/usr/bin/make -f
+# Relate pins Rust 1.88.0 (rust-toolchain.toml); Debian trixie ships 1.85,
+# so the toolchain is bootstrapped with rustup into a build-local directory
+# (same approach as the zellij package).
+export DH_VERBOSE = 1
+export RUSTUP_HOME = $(CURDIR)/debian/.rustup
+export CARGO_HOME = $(CURDIR)/debian/.cargo
+export PATH := $(CARGO_HOME)/bin:$(PATH)
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+	rustup toolchain install $$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml) --profile minimal
+	cargo build --release --locked -p relate-cli --bin relate
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/relate debian/relate/usr/bin/relate
+	install -D -m 0755 debian/mcp-server-relate.sh debian/mcp-server-relate/usr/bin/mcp-server-relate
+	install -D -m 0644 debian/server.json debian/mcp-server-relate/usr/share/mcp-server-relate/server.json
+	install -D -m 0644 debian/metainfo.xml debian/mcp-server-relate/usr/share/metainfo/ai.relatedb.mcp-server-relate.metainfo.xml
+	install -D -m 0644 debian/SKILL.md debian/mcp-server-relate/usr/share/mcp-server-relate/SKILL.md
+
+override_dh_dwz:
+
+override_dh_auto_clean:
+	rm -rf target debian/.rustup debian/.cargo

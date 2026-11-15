@@ -1,0 +1,2 @@
+# Rust crates are statically linked by design (libyaml via a vendored crate).
+relate: embedded-library libyaml [usr/bin/relate]

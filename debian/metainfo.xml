@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="console-application">
+  <id>ai.relatedb.mcp-server-relate</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Relate MCP Server</name>
+  <summary>Relate graph database as an MCP server</summary>
+  <description>
+    <p>Exposes a local Relate graph database (Cypher 25) to AI assistants over the Model Context Protocol on stdio.</p>
+  </description>
+  <developer id="cz.vitexsoftware"><name>VitexSoftware</name></developer>
+  <url type="homepage">https://relatedb.ai/</url>
+  <url type="vcs-browser">https://github.com/Vitexus/relate</url>
+  <url type="bugtracker">https://github.com/relatedb/relate/issues</url>
+  <provides><binary>mcp-server-relate</binary></provides>
+</component>

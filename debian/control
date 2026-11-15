@@ -1,0 +1,49 @@
+Source: relate
+Section: database
+Priority: optional
+Maintainer: CyberVitexus <info@vitexsoftware.cz>
+Build-Depends:
+ debhelper-compat (= 13),
+ build-essential,
+ ca-certificates,
+ curl,
+ pkg-config,
+ cmake,
+ libssl-dev,
+ zlib1g-dev,
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://relatedb.ai/
+Vcs-Git: https://github.com/Vitexus/relate.git
+Vcs-Browser: https://github.com/Vitexus/relate
+
+Package: relate
+Architecture: any
+Multi-Arch: foreign
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: embedded agent-native graph database (Cypher 25)
+ Relate is an embedded, local graph database written in Rust that
+ supports Cypher 25, with an in-memory or transactional filesystem store.
+ .
+ The relate command provides a REPL, query/load/pull/push tools and
+ can serve a database over Bolt, HTTP and MCP.
+
+Package: mcp-server-relate
+Architecture: all
+Depends: ${misc:Depends}, relate (>= ${source:Version})
+Description: Relate graph database as an MCP server (stdio)
+ Launcher exposing a Relate database to AI assistants over the Model
+ Context Protocol on stdio (relate serve --mcp stdio).
+ .
+ Environment: MCP_SERVER_RELATE_DATABASE (database directory) and
+ MCP_SERVER_RELATE_READ_ONLY (true to open the store read-only).
+
+Package: mcprack-mcp-server-relate
+Architecture: all
+Depends: ${misc:Depends},
+ mcprack (>= 1.6.0),
+ mcp-server-relate (= ${binary:Version}),
+Description: Registers Relate MCP server into mcprack catalog
+ Companion package for mcp-server-relate. Installing it registers
+ the mcp-server-relate binary as an available MCP server in the local
+ mcprack instance; removing it unregisters it again.

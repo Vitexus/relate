@@ -1,0 +1,18 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: relate
+Source: https://github.com/relatedb/relate
+
+Files: *
+Copyright: Relate contributors
+License: Apache-2.0
+
+Files: debian/*
+Copyright: 2026 CyberVitexus <info@vitexsoftware.cz>
+License: Apache-2.0
+
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0. On Debian systems the full
+ text is in /usr/share/common-licenses/Apache-2.0.
+ .
+ The binary statically links third-party Rust crates, each under its own
+ licence (see Cargo.lock).

@@ -1,0 +1,7 @@
+#!/bin/sh
+# DEP-8 smoke test: spawn the installed launcher, do the MCP handshake and
+# print the tools/resources/prompts it serves.
+set -e
+MCP_SERVER_RELATE_DATABASE="$(mktemp -d)"
+export MCP_SERVER_RELATE_DATABASE
+mcprack server probe /usr/bin/mcp-server-relate
