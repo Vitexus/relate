@@ -24,7 +24,7 @@
         },
         {
           "name": "MCP_SERVER_RELATE_READ_ONLY",
-          "description": "Open the store read-only when set to true",
+          "description": "Open the store read-only (default true; set false to allow writes)",
           "default": "true",
           "choices": [
             "true",

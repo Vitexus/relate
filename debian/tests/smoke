@@ -4,4 +4,6 @@
 set -e
 MCP_SERVER_RELATE_DATABASE="$(mktemp -d)"
 export MCP_SERVER_RELATE_DATABASE
+# fresh empty store: writable so it can be created
+export MCP_SERVER_RELATE_READ_ONLY=false
 mcprack server probe /usr/bin/mcp-server-relate
