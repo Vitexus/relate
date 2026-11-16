@@ -15,8 +15,7 @@ pub struct IndexDef {
 
 /// The `:Label(property)` schema text of one index pair — the one
 /// spelling every render of an index target reads ([`IndexDef::
-/// index_text`]'s own text, the plan tree's `AllNodesScan` suggestion,
-/// the `LabelDisjunctionScan` warning's per-label pairs), never a
+/// index_text`]'s own text, the `LabelDisjunctionScan` warning's per-label pairs), never a
 /// per-site `format!`.
 pub fn index_schema_text(label: &str, property: &str) -> String {
     format!(":{label}({property})")
@@ -24,8 +23,7 @@ pub fn index_schema_text(label: &str, property: &str) -> String {
 
 impl IndexDef {
     /// The index's `:Label(property)` schema text — the one spelling the
-    /// schema-naming reads render (the plan tree's `AllNodesScan`
-    /// suggestion, the warnings that name an existing index, the store
+    /// schema-naming reads render (the warnings that name an existing index, the store
     /// manifest's index lines), never a per-site `format!`. The property renders its bare name:
     /// `IndexDef.property` is dual-encoded in the catalog (bare for
     /// `CREATE INDEX` rows, legacy `{property}#{KIND}#{name}` for

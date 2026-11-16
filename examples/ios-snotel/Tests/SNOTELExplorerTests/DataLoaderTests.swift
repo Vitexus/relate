@@ -56,19 +56,8 @@ struct DataLoaderTests {
         #expect(basins.count == 1)
         #expect(basins[0].name == "Test Basin")
         #expect(basins[0].huc2 == "99")
-        #expect(basins[0].geoJSON.contains("\"type\":\"Polygon\""))
-        #expect(basins[0].contains(latitude: 41, longitude: -119))
-        #expect(!basins[0].contains(latitude: 43, longitude: -119))
-    }
-
-    @Test("Basin containment excludes holes")
-    func basinContainmentWithHole() {
-        let square = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0], [0.0, 0.0]]
-        let hole = [[4.0, 4.0], [6.0, 4.0], [6.0, 6.0], [4.0, 6.0], [4.0, 4.0]]
-        let basin = BasinFeature(name: "Ring", huc2: "00", geoJSON: "", rings: [square, hole])
-        #expect(basin.contains(latitude: 2, longitude: 2))
-        #expect(!basin.contains(latitude: 5, longitude: 5))
-        #expect(!basin.contains(latitude: 11, longitude: 5))
+        #expect(basins[0].outline == (try BasinOutline(
+            rings: [ring((-120, 40), (-120, 42), (-118, 42), (-118, 40), (-120, 40))])))
     }
 
     @Test("Empty CSV returns empty array")

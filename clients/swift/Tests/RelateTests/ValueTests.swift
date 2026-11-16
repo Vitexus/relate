@@ -6,6 +6,15 @@ import Testing
 @Suite struct ValueTests {
     let conn = try! Database.inMemory().connect()
 
+    @Test func everyKindHasItsErrorTextName() {
+        // A mismatch reports the kind it found by this name, and callers
+        // match on it, so each spelling is pinned.
+        #expect(CypherValueKind.allCases.map(\.name) == [
+            "null", "bool", "int", "float", "string", "node", "relationship", "path", "list", "map",
+            "point", "date", "time", "localTime", "dateTime", "localDateTime", "duration", "vector",
+        ])
+    }
+
     @Test func scalarsRoundTrip() throws {
         let r = try conn.query(
             "RETURN 1 AS i, 1.0 AS f, true AS b, 'x' AS s, null AS n, [1, 'a'] AS l, {k: 2} AS m")

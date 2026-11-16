@@ -435,7 +435,10 @@ fn pair_counts_include_sealed_hops_after_a_fold() {
     let g = Graph::default();
     let (a, _, _, type_id) = crate::graph::test_support::folded_floor_chunk(&g);
     let floor = crate::adjacency::COMPACTION_DELTA_FLOOR;
-    assert_eq!(g.sealed_out.get(&a).unwrap().chunk_len(type_id), floor);
+    assert_eq!(
+        g.out_side().sealed.get(&a).unwrap().chunk_len(type_id),
+        floor
+    );
     assert_eq!(g.pattern_pair_rows("N", "T", "N"), Some(floor as u64));
 
     g.begin_write().unwrap();
@@ -773,14 +776,14 @@ fn any_degree_tail_is_the_highest_tail_across_labels_and_types() {
     g.commit_write();
 
     // Per type: the highest label's tail (Big's 16, not Small's 1).
-    assert_eq!(g.pattern_any_degree_tail(Some("R")), Some(16));
-    assert_eq!(g.pattern_any_degree_tail(Some("S")), Some(2));
+    assert_eq!(g.pattern_type_degree_tail("R"), Some(16));
+    assert_eq!(g.pattern_type_degree_tail("S"), Some(2));
     // Any type: the per-type maxima summed (floors on the same scale).
-    assert_eq!(g.pattern_any_degree_tail(None), Some(18));
+    assert_eq!(g.pattern_any_degree_tail(), Some(18));
     // A type never written answers None, not zero.
-    assert_eq!(g.pattern_any_degree_tail(Some("NEVER")), None);
+    assert_eq!(g.pattern_type_degree_tail("NEVER"), None);
     // No histogram at all: None.
-    assert_eq!(Graph::default().pattern_any_degree_tail(None), None);
+    assert_eq!(Graph::default().pattern_any_degree_tail(), None);
 }
 
 /// The degree moments read each log2 bucket at the uniform mean of its

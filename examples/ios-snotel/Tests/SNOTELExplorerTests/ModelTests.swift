@@ -4,6 +4,11 @@ import Relate
 
 @Suite("Model Tests")
 struct ModelTests {
+    /// Decodes a model from one result row given as its columns, the way
+    /// `QueryResult.decode` does for each record.
+    private func decode<T: Decodable>(_ type: T.Type, _ row: [String: CypherValue]) throws -> T {
+        try CypherValueDecoder().decode(T.self, from: .map(row))
+    }
 
     @Test("SWELevel classification")
     func sweLevel() {
@@ -19,18 +24,18 @@ struct ModelTests {
         #expect(SWELevel.from(swe: 50) == .veryHigh)
     }
 
-    @Test("Station.from parses CypherValue row")
+    @Test("A station decodes from its projection's row")
     func stationFromRow() throws {
         let row: [String: CypherValue] = [
             "id": .int(302),
             "name": .string("Aneroid Lake"),
             "state": .string("OR"),
-            "lat": .float(45.0833),
-            "lon": .float(-117.15),
+            "latitude": .float(45.0833),
+            "longitude": .float(-117.15),
             "elevation": .int(7500),
-            "swe": .float(28.5),
+            "sweInches": .float(28.5),
         ]
-        let station = try Station.from(row: row)
+        let station = try decode(Station.self, row)
         #expect(station.id == 302)
         #expect(station.name == "Aneroid Lake")
         #expect(station.elevation == 7500)
@@ -38,71 +43,93 @@ struct ModelTests {
         #expect(station.sweLevel == .high)
     }
 
-    @Test("Station.from handles missing SWE")
+    @Test("A station without a reading has no SWE")
     func stationMissingSWE() throws {
         let row: [String: CypherValue] = [
             "id": .int(1),
             "name": .string("Test"),
             "state": .string("XX"),
-            "lat": .float(40.0),
-            "lon": .float(-110.0),
+            "latitude": .float(40.0),
+            "longitude": .float(-110.0),
             "elevation": .int(5000),
         ]
-        let station = try Station.from(row: row)
+        let station = try decode(Station.self, row)
         #expect(station.sweInches == nil)
         #expect(station.sweLevel == .noData)
     }
 
-    @Test("Station.from refuses a row missing a guaranteed column")
+    @Test("A station row missing a guaranteed column is refused")
     func stationMissingElevation() {
         let row: [String: CypherValue] = [
             "id": .int(1),
             "name": .string("Test"),
             "state": .string("XX"),
-            "lat": .float(40.0),
-            "lon": .float(-110.0),
+            "latitude": .float(40.0),
+            "longitude": .float(-110.0),
         ]
-        #expect(throws: RelateError.self) { try Station.from(row: row) }
+        #expect(throws: RelateError.self) { try decode(Station.self, row) }
     }
 
-    @Test("Basin.from parses CypherValue row")
-    func basinFromRow() throws {
-        let row: [String: CypherValue] = [
+    /// A basin's row, with `squareOutline` stored as its geometry text.
+    private func basinRow(avgSWE: CypherValue, stationCount: Int) throws -> [String: CypherValue] {
+        [
             "name": .string("Pacific Northwest"),
             "huc2": .string("17"),
-            "geojson": .string("{\"type\":\"Polygon\"}"),
-            "avgSWE": .float(22.5),
-            "stationCount": .int(12),
+            "geoJSON": .string(try squareOutline().geoJSON()),
+            "avgSWE": avgSWE,
+            "stationCount": .int(Int64(stationCount)),
         ]
-        let basin = try Basin.from(row: row)
-        #expect(basin.name == "Pacific Northwest")
-        #expect(basin.avgSWE == 22.5)
-        #expect(basin.stationCount == 12)
-        #expect(basin.geoJSON.contains("Polygon"))
     }
 
-    @Test("Basin.from leaves a basin without readings unaveraged")
+    @Test("A basin decodes from its query's row, identified by its HUC2 code")
+    func basinFromRow() throws {
+        let basin = try decode(Basin.self, try basinRow(avgSWE: .float(22.5), stationCount: 12))
+        #expect(basin == Basin(
+            name: "Pacific Northwest", huc2: "17", outline: try squareOutline(), avgSWE: 22.5, stationCount: 12))
+        #expect(basin.id == "17")
+    }
+
+    @Test("A basin without readings has no average")
     func basinWithoutReadings() throws {
-        let basin = try Basin.from(row: [
-            "name": .string("Dry"), "huc2": .string("15"), "geojson": .string("{}"),
-            "avgSWE": .null, "stationCount": .int(0),
-        ])
+        let basin = try decode(Basin.self, try basinRow(avgSWE: .null, stationCount: 0))
         #expect(basin.avgSWE == nil)
         #expect(basin.stationCount == 0)
     }
 
+    @Test("A basin row whose stored geometry is not a Polygon is refused", arguments: [
+        "not json",
+        #"{"type":"Point","coordinates":[0,0]}"#,
+        #"{"type":"Polygon","coordinates":[]}"#,
+        #"{"type":"Polygon","coordinates":[[]]}"#,
+        #"{"type":"Polygon","coordinates":[[[0,0],[1,1],[0,0]]]}"#,
+        #"{"type":"Polygon","coordinates":[[[0],[1],[2],[0]]]}"#,
+    ])
+    func basinGeometryNotAPolygon(stored: String) throws {
+        var row = try basinRow(avgSWE: .null, stationCount: 0)
+        row["geoJSON"] = .string(stored)
+        #expect(throws: RelateError.self) { try decode(Basin.self, row) }
+    }
+
+    @Test("The snowpack ranking is the basins with readings, highest mean first")
+    func ranking() throws {
+        func basin(_ huc2: String, _ avgSWE: Double?) throws -> Basin {
+            Basin(name: "Basin \(huc2)", huc2: huc2, outline: try squareOutline(), avgSWE: avgSWE, stationCount: 1)
+        }
+        let ranked = try [basin("15", 4.5), basin("16", nil), basin("17", 22.5)].bySWE
+        #expect(ranked.map(\.id) == ["17", "15"] && ranked.map(\.swe) == [22.5, 4.5])
+    }
+
     @Test("QueryLogEntry exposes a failure's message")
     func logEntryFailure() {
-        let entry = QueryLogEntry(cypher: "X", parameters: nil, durationMilliseconds: 0,
-                                  queryType: nil, rowCount: 0, mutationCount: 0,
-                                  outcome: .failure("boom"))
+        let entry = QueryLogEntry(cypher: "X", parameters: [], durationMilliseconds: 0,
+                                  queryType: nil, rowCount: 0, outcome: .failure("boom"))
         #expect(entry.failureMessage == "boom")
         #expect(!entry.succeeded)
     }
 
-    @Test("Basin.from refuses a row without a name")
+    @Test("A basin row without a name is refused")
     func basinMissingName() {
-        #expect(throws: RelateError.self) { try Basin.from(row: ["huc2": .string("17")]) }
+        #expect(throws: RelateError.self) { try decode(Basin.self, ["huc2": .string("17")]) }
     }
 
     @Test("The legend lists every level, no-data last")

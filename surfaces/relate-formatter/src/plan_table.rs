@@ -83,7 +83,7 @@ pub(crate) fn format_plan(
     }
     if flags.warnings {
         // The footer embeds the same warning texts as the `Warnings` cells —
-        // `AllNodesScan` carries catalog index text — so it passes the same
+        // `LabelDisjunctionScan` carries catalog index text — so it passes the same
         // one escaping boundary: a control character in an index label must
         // not reach the terminal raw.
         writeln!(w, "{}", escape_control(&walk.warnings_footer(), false))?;

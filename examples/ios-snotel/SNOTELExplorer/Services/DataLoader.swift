@@ -1,6 +1,8 @@
 import Foundation
 
-struct StationCSVRow {
+/// One station of the bundled dataset. Its property names are the keys the
+/// station load statement reads (`row.elevationFt`, …).
+struct StationCSVRow: Encodable {
     let id: Int
     let name: String
     let state: String
@@ -9,7 +11,9 @@ struct StationCSVRow {
     let elevationFt: Int
 }
 
-struct ReadingCSVRow {
+/// One reading of the bundled dataset. Its property names are the keys the
+/// reading load statement reads (`row.stationId`, …).
+struct ReadingCSVRow: Encodable {
     let stationId: Int
     let date: String
     let sweInches: Double
@@ -17,34 +21,12 @@ struct ReadingCSVRow {
     let tempAvgF: Int
 }
 
+/// One basin of the bundled document: its name, its HUC2 code and its
+/// outline, which decides which stations it contains.
 struct BasinFeature {
     let name: String
     let huc2: String
-    /// The feature's GeoJSON `geometry` object, serialized, for the map overlay.
-    let geoJSON: String
-    /// Polygon rings as `[longitude, latitude]` pairs; the first is the outer ring.
-    let rings: [[[Double]]]
-
-    /// Even-odd ray-casting containment: inside the outer ring and outside
-    /// every hole. A point exactly on an edge may land on either side, which
-    /// is fine for basin-scale polygons.
-    func contains(latitude: Double, longitude: Double) -> Bool {
-        func inRing(_ ring: [[Double]]) -> Bool {
-            var inside = false
-            var j = ring.count - 1
-            for i in ring.indices {
-                let (xi, yi, xj, yj) = (ring[i][0], ring[i][1], ring[j][0], ring[j][1])
-                if (yi > latitude) != (yj > latitude),
-                   longitude < (xj - xi) * (latitude - yi) / (yj - yi) + xi {
-                    inside.toggle()
-                }
-                j = i
-            }
-            return inside
-        }
-        guard let outer = rings.first, inRing(outer) else { return false }
-        return !rings.dropFirst().contains(where: inRing)
-    }
+    let outline: BasinOutline
 }
 
 /// A failure surfaced while loading a bundled data resource.
@@ -118,22 +100,30 @@ enum DataLoader {
     }
 
     static func parseBasinsGeoJSON(_ data: Data) throws -> [BasinFeature] {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let features = json["features"] as? [[String: Any]] else {
-            throw DataLoaderError.malformed("basins: not a GeoJSON FeatureCollection")
-        }
-        return try features.enumerated().map { index, feature in
-            guard let props = feature["properties"] as? [String: Any],
-                  let name = props["name"] as? String,
-                  let huc2 = props["huc2"] as? String,
-                  let geometry = feature["geometry"] as? [String: Any],
-                  let coords = geometry["coordinates"] as? [[[Double]]],
-                  let geometryData = try? JSONSerialization.data(
-                      withJSONObject: geometry, options: [.sortedKeys]),
-                  let geoJSON = String(data: geometryData, encoding: .utf8) else {
-                throw DataLoaderError.malformed("basin feature \(index): not a named Polygon feature")
+        do {
+            return try JSONDecoder().decode(BasinCollection.self, from: data).features.map { feature in
+                BasinFeature(
+                    name: feature.properties.name, huc2: feature.properties.huc2, outline: feature.geometry)
             }
-            return BasinFeature(name: name, huc2: huc2, geoJSON: geoJSON, rings: coords)
+        } catch {
+            // The coder's own error says which feature and key did not parse.
+            throw DataLoaderError.malformed("basins: \(error)")
+        }
+    }
+
+    /// The shape of the bundled basins document: a GeoJSON
+    /// FeatureCollection of named Polygon features.
+    private struct BasinCollection: Decodable {
+        let features: [Feature]
+
+        struct Feature: Decodable {
+            let properties: Properties
+            let geometry: BasinOutline
+        }
+
+        struct Properties: Decodable {
+            let name: String
+            let huc2: String
         }
     }
 

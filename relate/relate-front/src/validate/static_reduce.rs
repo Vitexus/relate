@@ -12,8 +12,10 @@
 use relate_error::{EngineError, ErrorKind};
 use relate_parser::{Expr, ReduceExpr};
 
+use crate::ast::tree::unparen;
+
 use super::static_arithmetic::applies_arithmetic_to_var;
-use super::static_literal::{is_arithmetic_op, static_literal_type, unparen, StaticLitType};
+use super::static_literal::{is_arithmetic_op, static_literal_type, StaticLitType};
 
 /// Whether `list` is a non-empty list *literal* whose every element is a call
 /// to a temporal constructor (`date`, `datetime`, `localtime`, `localdatetime`,

@@ -126,9 +126,7 @@ mod tests {
         for warning in [
             PlanWarning::EstimationMiss,
             PlanWarning::CartesianProduct,
-            PlanWarning::AllNodesScan {
-                index: ":Person(name)".to_string(),
-            },
+            PlanWarning::AllNodesScan,
             PlanWarning::LabelDisjunctionScan {
                 indexes: ":Model(id), :Source(id)".to_string(),
             },
@@ -136,7 +134,7 @@ mod tests {
             match &warning {
                 PlanWarning::EstimationMiss
                 | PlanWarning::CartesianProduct
-                | PlanWarning::AllNodesScan { .. }
+                | PlanWarning::AllNodesScan
                 | PlanWarning::LabelDisjunctionScan { .. } => {}
             }
             let kind = warning.notification_kind();

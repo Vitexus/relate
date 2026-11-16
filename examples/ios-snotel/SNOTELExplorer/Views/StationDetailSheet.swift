@@ -50,7 +50,7 @@ struct StationDetailSheet: View {
                             latitude: station.latitude,
                             longitude: station.longitude
                         )
-                        Task { await viewModel.searchNearby(center: center) }
+                        viewModel.searchNearby(center: center)
                         viewModel.selectedStation = nil
                     } label: {
                         Label("Find Nearby Stations", systemImage: "location.magnifyingglass")
@@ -63,7 +63,7 @@ struct StationDetailSheet: View {
     }
 }
 
-struct SWEGaugeView: View {
+private struct SWEGaugeView: View {
     let swe: Double
     private let maxSWE: Double = 50
 

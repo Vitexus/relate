@@ -7,11 +7,11 @@ use std::collections::BTreeMap;
 use relate_core::Value;
 use relate_ir::Direction;
 
-use crate::exec::test_support::{build, try_exec_cypher_params, Builder};
+use crate::exec::test_support::{build, try_exec_cypher, try_exec_cypher_params, Builder};
 use crate::graph::Graph;
 use crate::shortest::test_support::counting_expands;
 
-use super::route::{take_anchor_arms, AnchorArm};
+use super::anchor::{take_anchor_arms, AnchorArm};
 use super::{take_route_runs, with_forced_gpm};
 
 /// Relationships shortest-path searches followed, (pattern, input row)
@@ -107,6 +107,25 @@ pub(super) fn gpm_params(g: &Graph, q: &str, params: &BTreeMap<String, Value>) -
     sorted(with_forced_gpm(|| {
         try_exec_cypher_params(g, q, params).unwrap().rows
     }))
+}
+
+/// The route's answer to `q` is the GPM walk's — rows, or the same error —
+/// and returns the run's [`Counts`].
+pub(super) fn parity(g: &Graph, q: &str) -> Counts {
+    let (routed, counts) = counting(|| try_exec_cypher(g, q));
+    let (oracle, oracle_counts) = counting(|| with_forced_gpm(|| try_exec_cypher(g, q)));
+    assert_eq!(
+        oracle_counts.route_runs, 0,
+        "the oracle must bypass the route for {q}"
+    );
+    // One equality over both answers: the rows, or the same typed error.
+    assert_eq!(
+        routed.map(|r| sorted(r.rows)),
+        oracle.map(|o| sorted(o.rows)),
+        "route and gpm disagree for {q}"
+    );
+    assert!(counts.route_runs > 0, "the route must take {q}");
+    counts
 }
 
 /// `rows` in [`Value::order_by_cmp`] order, for order-insensitive

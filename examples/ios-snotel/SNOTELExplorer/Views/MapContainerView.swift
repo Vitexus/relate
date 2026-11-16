@@ -3,6 +3,9 @@ import MapKit
 import SwiftUI
 
 struct MapContainerView: UIViewRepresentable {
+    /// What the map shows, from the screen's live queries.
+    var stations: [Station]
+    var basins: [Basin]
     var viewModel: MapViewModel
 
     func makeUIView(context: Context) -> MKMapView {
@@ -37,6 +40,8 @@ struct MapContainerView: UIViewRepresentable {
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
         context.coordinator.viewModel = viewModel
+        context.coordinator.stations = stations
+        context.coordinator.basins = basins
         context.coordinator.updateStations(on: mapView)
         context.coordinator.updateBasinOverlays(on: mapView)
         context.coordinator.updateBasinStyles(on: mapView)
@@ -56,11 +61,14 @@ struct MapContainerView: UIViewRepresentable {
         )
 
         var viewModel: MapViewModel
+        var stations: [Station] = []
+        var basins: [Basin] = []
         private var stationAnnotations: [StationAnnotation] = []
         private var appliedStations: [Station] = []
-        private var basinByOverlay: [ObjectIdentifier: Basin] = [:]
-        private var overlaidBasins: [Basin] = []
-        private var styledSelection: String?
+        /// The overlays this coordinator put on the map, one per basin:
+        /// the ones it removes, restyles and rebuilds.
+        private var basinOverlays: [BasinOverlay] = []
+        private var styledSelection: Basin.ID?
         private var wasFiltered = false
 
         init(viewModel: MapViewModel) {
@@ -68,12 +76,12 @@ struct MapContainerView: UIViewRepresentable {
         }
 
         func updateStations(on mapView: MKMapView) {
-            guard viewModel.stations != appliedStations else { return }
+            guard stations != appliedStations else { return }
 
             mapView.removeAnnotations(stationAnnotations)
-            stationAnnotations = viewModel.stations.map(StationAnnotation.init)
+            stationAnnotations = stations.map(StationAnnotation.init)
             mapView.addAnnotations(stationAnnotations)
-            appliedStations = viewModel.stations
+            appliedStations = stations
 
             if viewModel.isFiltered, !stationAnnotations.isEmpty {
                 fit(stationAnnotations, on: mapView, animated: true)
@@ -83,44 +91,28 @@ struct MapContainerView: UIViewRepresentable {
             wasFiltered = viewModel.isFiltered
         }
 
-        /// Builds the basin overlays from the geometry the graph stores
-        /// (`Basin.geoJSON`, a GeoJSON geometry object), once per basin list;
-        /// each overlay keeps its `Basin`, so styling reads it directly.
+        /// Builds one overlay per basin, once per basin list. Each overlay
+        /// carries its `Basin`, so styling reads it from the overlay.
         func updateBasinOverlays(on mapView: MKMapView) {
-            guard viewModel.basins != overlaidBasins else { return }
-            overlaidBasins = viewModel.basins
+            guard basins != basinOverlays.map(\.basin) else { return }
 
-            mapView.removeOverlays(mapView.overlays)
-            basinByOverlay.removeAll()
-            var overlays: [MKOverlay] = []
-            for basin in viewModel.basins {
-                let objects: [MKGeoJSONObject]
-                do {
-                    objects = try MKGeoJSONDecoder().decode(Data(basin.geoJSON.utf8))
-                } catch {
-                    // The loader wrote this geometry from a parsed Polygon.
-                    preconditionFailure("basin \(basin.name): stored geometry is not GeoJSON: \(error)")
-                }
-                for case let overlay as MKOverlay in objects {
-                    overlays.append(overlay)
-                    basinByOverlay[ObjectIdentifier(overlay as AnyObject)] = basin
-                }
-            }
-            mapView.addOverlays(overlays, level: .aboveRoads)
+            mapView.removeOverlays(basinOverlays)
+            basinOverlays = basins.map(BasinOverlay.init)
+            mapView.addOverlays(basinOverlays, level: .aboveRoads)
         }
 
         /// Restyles the live renderers when the basin selection changes; a
         /// rebuilt overlay list needs no restyle, since each new renderer is
         /// styled as `mapView(_:rendererFor:)` creates it.
         func updateBasinStyles(on mapView: MKMapView) {
-            guard viewModel.selectedBasinName != styledSelection else { return }
-            styledSelection = viewModel.selectedBasinName
+            guard viewModel.selectedBasin != styledSelection else { return }
+            styledSelection = viewModel.selectedBasin
 
-            for overlay in mapView.overlays {
+            for overlay in basinOverlays {
                 guard let renderer = mapView.renderer(for: overlay) as? MKOverlayPathRenderer else {
                     continue
                 }
-                style(renderer, for: overlay)
+                style(renderer, for: overlay.basin)
                 renderer.setNeedsDisplay()
             }
         }
@@ -146,29 +138,26 @@ struct MapContainerView: UIViewRepresentable {
                 return
             }
             guard let annotation = view.annotation as? StationAnnotation else { return }
-            viewModel.selectedStation = viewModel.stations.first { $0.id == annotation.stationID }
+            viewModel.selectedStation = annotation.station
             mapView.deselectAnnotation(annotation, animated: true)
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            let renderer: MKOverlayPathRenderer
-            if let polygon = overlay as? MKPolygon {
-                renderer = MKPolygonRenderer(polygon: polygon)
-            } else if let multiPolygon = overlay as? MKMultiPolygon {
-                renderer = MKMultiPolygonRenderer(multiPolygon: multiPolygon)
-            } else {
+            // An overlay this coordinator did not add gets the default
+            // renderer.
+            guard let overlay = overlay as? BasinOverlay else {
                 return MKOverlayRenderer(overlay: overlay)
             }
+            let renderer = MKPolygonRenderer(polygon: overlay.polygon)
             renderer.lineJoin = .round
             renderer.lineCap = .round
-            style(renderer, for: overlay)
+            style(renderer, for: overlay.basin)
             return renderer
         }
 
-        private func style(_ renderer: MKOverlayPathRenderer, for overlay: MKOverlay) {
-            let basin = basinByOverlay[ObjectIdentifier(overlay as AnyObject)]
-            let color = UIColor(SWELevel.from(swe: basin?.avgSWE).color)
-            let emphasis = BasinEmphasis(basin: basin?.name, selected: viewModel.selectedBasinName)
+        private func style(_ renderer: MKOverlayPathRenderer, for basin: Basin) {
+            let color = UIColor(SWELevel.from(swe: basin.avgSWE).color)
+            let emphasis = BasinEmphasis(basin: basin.id, selected: viewModel.selectedBasin)
 
             renderer.fillColor = color.withAlphaComponent(emphasis.fillAlpha)
             renderer.strokeColor = color.withAlphaComponent(emphasis.strokeAlpha)
@@ -212,7 +201,7 @@ struct MapContainerView: UIViewRepresentable {
 private enum BasinEmphasis {
     case selected, dimmed, plain
 
-    init(basin: String?, selected: String?) {
+    init(basin: Basin.ID, selected: Basin.ID?) {
         guard let selected else { self = .plain; return }
         self = basin == selected ? .selected : .dimmed
     }
@@ -242,17 +231,38 @@ private enum BasinEmphasis {
     }
 }
 
-private final class StationAnnotation: MKPointAnnotation {
-    let stationID: Int
-    let sweInches: Double?
-    let elevation: Int
+/// A basin on the map: its `Basin` and the polygon of its outline, the
+/// outer ring with the holes as interior polygons. The renderer draws the
+/// polygon and is styled from the basin.
+private final class BasinOverlay: NSObject, MKOverlay {
+    let basin: Basin
+    let polygon: MKPolygon
 
-    var sweLevel: SWELevel { SWELevel.from(swe: sweInches) }
+    var coordinate: CLLocationCoordinate2D { polygon.coordinate }
+    var boundingMapRect: MKMapRect { polygon.boundingMapRect }
+
+    init(basin: Basin) {
+        func coordinates(_ ring: [BasinOutline.Position]) -> [CLLocationCoordinate2D] {
+            ring.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+        }
+        let outer = coordinates(basin.outline.outer)
+        let holes = basin.outline.holes.map { ring in
+            let hole = coordinates(ring)
+            return MKPolygon(coordinates: hole, count: hole.count)
+        }
+        self.basin = basin
+        polygon = MKPolygon(coordinates: outer, count: outer.count, interiorPolygons: holes)
+        super.init()
+    }
+}
+
+/// A station's pin. It keeps the station it stands for, so a tap selects
+/// that station and the pin's color and text are read from it.
+private final class StationAnnotation: MKPointAnnotation {
+    let station: Station
 
     init(station: Station) {
-        stationID = station.id
-        sweInches = station.sweInches
-        elevation = station.elevation
+        self.station = station
         super.init()
         coordinate = CLLocationCoordinate2D(
             latitude: station.latitude,
@@ -303,11 +313,12 @@ private final class StationAnnotationView: MKAnnotationView {
 
     private func applyStyle() {
         guard let annotation = annotation as? StationAnnotation else { return }
-        backgroundColor = UIColor(annotation.sweLevel.color)
-        accessibilityLabel = annotation.title ?? "SNOTEL station"
-        accessibilityValue = annotation.sweInches.map {
-            String(format: "Snow water equivalent %.1f inches, elevation %d feet", $0, annotation.elevation)
-        } ?? "No snow water equivalent data, elevation \(annotation.elevation) feet"
+        let station = annotation.station
+        backgroundColor = UIColor(station.sweLevel.color)
+        accessibilityLabel = station.name
+        accessibilityValue = station.sweInches.map {
+            String(format: "Snow water equivalent %.1f inches, elevation %d feet", $0, station.elevation)
+        } ?? "No snow water equivalent data, elevation \(station.elevation) feet"
     }
 }
 
@@ -348,7 +359,7 @@ private final class StationClusterAnnotationView: MKAnnotationView {
     private func applyStyle() {
         guard let cluster = annotation as? MKClusterAnnotation else { return }
         let stations = cluster.memberAnnotations.compactMap { $0 as? StationAnnotation }
-        let values = stations.compactMap(\.sweInches)
+        let values = stations.compactMap(\.station.sweInches)
         let average = values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
         backgroundColor = UIColor(SWELevel.from(swe: average).color)
         countLabel.text = "\(stations.count)"

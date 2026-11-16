@@ -26,7 +26,7 @@ pub(crate) struct RangeIndexedProperty {
 /// builds, ADR-0218) and by the test fakes.
 pub(crate) trait PlanStats: PatternStats {
     /// The property indexes the store carries, as `:Label(property)` texts
-    /// — the suggestions the plan tree's `AllNodesScan` warning names.
+    /// — the gate the plan tree's `AllNodesScan` warning reads.
     fn property_index_texts(&self) -> Vec<String>;
 
     /// Every node `(label, property)` pair a RANGE index serves an equality
@@ -82,7 +82,7 @@ impl<'a> GraphPatternStats<'a> {
 
 impl PlanStats for GraphPatternStats<'_> {
     /// The property indexes the store carries, as `:Label(property)` texts —
-    /// the suggestions the plan tree's `AllNodesScan` warning names. The
+    /// the gate the plan tree's `AllNodesScan` warning reads. The
     /// catalog's own listing order, never a re-sorted copy.
     fn property_index_texts(&self) -> Vec<String> {
         self.graph

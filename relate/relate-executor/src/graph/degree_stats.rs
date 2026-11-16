@@ -258,36 +258,35 @@ impl Graph {
     }
 
     /// LABS-991: the highest tail ([`Graph::pattern_degree_tail`]'s floor)
-    /// over every labeled node's histogram for `rel_type`, or — for `None` —
-    /// the per-type maxima summed — each term the same log2-bucket floor
-    /// as [`Graph::pattern_degree_tail`], so the sum is an estimate on that
-    /// scale, not a strict upper bound. Nodes without a label sit in no
-    /// histogram. `None` when no histogram entry matches.
-    pub(crate) fn pattern_any_degree_tail(&self, rel_type: Option<&str>) -> Option<u64> {
-        let wanted = match rel_type {
-            Some(text) => Some(self.interner.get_id(text)?),
-            None => None,
-        };
+    /// over every labeled node's histogram for `rel_type`. Nodes without a
+    /// label sit in no histogram. `None` when no histogram entry matches.
+    pub(crate) fn pattern_type_degree_tail(&self, rel_type: &str) -> Option<u64> {
+        let type_id = self.interner.get_id(rel_type)?;
         let histograms = self.degree_histograms.lock().unwrap();
-        let mut per_type: HashMap<u32, u64> = HashMap::new();
-        for (&(_, type_id), buckets) in histograms.iter() {
-            if wanted.is_some_and(|w| w != type_id) {
-                continue;
-            }
-            let Some(tail) = Self::bucket_tail(buckets) else {
-                continue;
-            };
-            let slot = per_type.entry(type_id).or_insert(0);
-            *slot = (*slot).max(tail);
-        }
-        if per_type.is_empty() {
-            return None;
-        }
-        Some(
-            per_type
-                .values()
-                .fold(0u64, |sum, tail| sum.saturating_add(*tail)),
-        )
+        Self::type_tail(&histograms, type_id)
+    }
+
+    /// LABS-991: the per-type maxima ([`Graph::pattern_type_degree_tail`])
+    /// summed over every distinct type id — each term the same log2-bucket
+    /// floor as [`Graph::pattern_degree_tail`], so the sum is an estimate on
+    /// that scale, not a strict upper bound. `None` when no histogram entry
+    /// has a tail.
+    pub(crate) fn pattern_any_degree_tail(&self) -> Option<u64> {
+        let histograms = self.degree_histograms.lock().unwrap();
+        let type_ids: HashSet<u32> = histograms.keys().map(|&(_, type_id)| type_id).collect();
+        type_ids
+            .into_iter()
+            .filter_map(|type_id| Self::type_tail(&histograms, type_id))
+            .reduce(u64::saturating_add)
+    }
+
+    /// The highest tail over every label's histogram for one type id.
+    fn type_tail(histograms: &DegreeHistograms, type_id: u32) -> Option<u64> {
+        histograms
+            .iter()
+            .filter(|(&(_, id), _)| id == type_id)
+            .filter_map(|(_, buckets)| Self::bucket_tail(buckets))
+            .max()
     }
 
     /// The estimated out-degree moments of one label's (or, for `None`,
@@ -308,29 +307,40 @@ impl Graph {
         label_id: Option<u32>,
         type_ids: Option<&[u32]>,
     ) -> DegreeMoments {
-        // Per label: the per-type degree sums and the squares' sum.
+        self.combine_label_moments(self.label_type_sums(label_id, type_ids))
+    }
+
+    /// The histogram scan under the one lock: per label, the per-type
+    /// degree sums and the squares' sum of the selected histograms.
+    fn label_type_sums(
+        &self,
+        label_id: Option<u32>,
+        type_ids: Option<&[u32]>,
+    ) -> HashMap<u32, (Vec<u128>, u128)> {
         let mut per_label: HashMap<u32, (Vec<u128>, u128)> = HashMap::new();
-        {
-            let histograms = self.degree_histograms.lock().unwrap();
-            for (&(label, type_id), buckets) in histograms.iter() {
-                if label_id.is_some_and(|wanted| wanted != label)
-                    || type_ids.is_some_and(|wanted| !wanted.contains(&type_id))
-                {
-                    continue;
-                }
-                let (sums, sum_sq) = per_label.entry(label).or_default();
-                let mut type_sum = 0u128;
-                for (bucket, &nodes) in buckets.iter().enumerate() {
-                    let low = 1u128 << bucket;
-                    let high = (low << 1) - 1;
-                    let nodes = u128::from(nodes);
-                    type_sum = type_sum.saturating_add(nodes * ((low + high) / 2));
-                    *sum_sq =
-                        sum_sq.saturating_add(nodes * ((low * low + low * high + high * high) / 3));
-                }
-                sums.push(type_sum);
+        let histograms = self.degree_histograms.lock().unwrap();
+        for (&(label, type_id), buckets) in histograms.iter() {
+            if !Self::selects(label_id, label) || !Self::selects_type(type_ids, type_id) {
+                continue;
             }
+            let (sums, sum_sq) = per_label.entry(label).or_default();
+            let mut type_sum = 0u128;
+            for (bucket, &nodes) in buckets.iter().enumerate() {
+                let low = 1u128 << bucket;
+                let high = (low << 1) - 1;
+                let nodes = u128::from(nodes);
+                type_sum = type_sum.saturating_add(nodes * ((low + high) / 2));
+                *sum_sq =
+                    sum_sq.saturating_add(nodes * ((low * low + low * high + high * high) / 3));
+            }
+            sums.push(type_sum);
         }
+        per_label
+    }
+
+    /// The lock-free derivation: fold the per-label sums into the moments,
+    /// adding each label's cross term over its node count.
+    fn combine_label_moments(&self, per_label: HashMap<u32, (Vec<u128>, u128)>) -> DegreeMoments {
         let mut moments = DegreeMoments::default();
         for (label, (sums, sum_sq)) in per_label {
             let sum = sums.iter().fold(0u128, |acc, &s| acc.saturating_add(s));
@@ -345,7 +355,7 @@ impl Graph {
             moments.sum_sq = moments
                 .sum_sq
                 .saturating_add(sum_sq)
-                .saturating_add(cross_pairs.checked_div(nodes).unwrap_or(0));
+                .saturating_add(if nodes == 0 { 0 } else { cross_pairs / nodes });
             // (A label with no live node left only has high-water
             // buckets: nothing is there to cross, so its term is zero.)
         }

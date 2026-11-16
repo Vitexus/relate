@@ -335,3 +335,6 @@ The facts the design starts from:
   `HintedIndexNotFound` (`01N31`) and `JoinHintUnfulfillable` (`01N30`),
   per this ADR's own "a new namespace or category is a new ADR"
   consequence.
+- ADR-0606: `AllNodesScan` becomes a bare warning with no index payload; the
+  suggestion it named could never serve a label-less pattern, so the text
+  advises adding a label instead.

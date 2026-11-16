@@ -199,16 +199,12 @@ fn check_clause_aggregate_arity(
     key_exprs: &[&Expr],
     order_by: &[OrderByItem],
 ) -> Result<(), EngineError> {
-    for item in items {
-        check_aggregate_arity(&item.expr)?;
-    }
-    for key in key_exprs {
-        check_aggregate_arity(key)?;
-    }
-    for ob in order_by {
-        check_aggregate_arity(&ob.expr)?;
-    }
-    Ok(())
+    items
+        .iter()
+        .map(|item| &item.expr)
+        .chain(key_exprs.iter().copied())
+        .chain(order_by.iter().map(|ob| &ob.expr))
+        .try_for_each(check_aggregate_arity)
 }
 
 /// Check if an expression contains a non-deterministic function call like

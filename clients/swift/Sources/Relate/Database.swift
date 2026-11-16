@@ -7,20 +7,44 @@ import Foundation
 /// reference (including every ``Connection`` made from it) is released.
 ///
 /// `Database` is `Sendable`: the C ABI documents a `relate_database` as
-/// safe to share across threads, so the wrapper adds no lock of its own.
-public final class Database: @unchecked Sendable {
-    private let handle: OpaquePointer
+/// safe to share across threads, so the wrapper adds no lock around it.
+///
+/// Besides the synchronous ``connect()``, a `Database` offers managed
+/// asynchronous access — `read(_:)` and `write(retries:_:)` — over
+/// connections it opens and owns itself.
+public final class Database: Sendable {
+    /// The open store. Connections hold it too, so the store outlives the
+    /// `Database` object for as long as any connection does.
+    let core: DatabaseCore
     public let path: String
     public let isReadOnly: Bool
+    /// The connections behind the managed asynchronous entry points. This
+    /// object owns the pool; the pool's connections refer back to it
+    /// without owning it, so releasing the last `Database` reference
+    /// releases them.
+    let pool: ConnectionPool
+
+    /// Settings for the managed asynchronous access.
+    public struct Options: Sendable, Hashable {
+        /// The most reader connections `Database.read(_:)` opens.
+        /// Reads beyond that wait their turn on the least busy reader. At
+        /// least 1: opening a database with fewer throws
+        /// ``RelateError/invalidParameter(_:)``.
+        public var maxReaders: Int
+
+        public init(maxReaders: Int = 2) {
+            self.maxReaders = maxReaders
+        }
+    }
 
     /// Opens (creating when missing) a writable store at `path`.
-    public convenience init(path: String) throws(RelateError) {
-        try self.init(path: path, readOnly: false)
+    public convenience init(path: String, options: Options = Options()) throws(RelateError) {
+        try self.init(path: path, readOnly: false, options: options)
     }
 
     /// Opens an existing store once, refusing writes and checkpoints (ADR-0136).
-    public convenience init(readOnlyPath path: String) throws(RelateError) {
-        try self.init(path: path, readOnly: true)
+    public convenience init(readOnlyPath path: String, options: Options = Options()) throws(RelateError) {
+        try self.init(path: path, readOnly: true, options: options)
     }
 
     /// Opens the store at a file URL: writable (created when missing) by
@@ -31,7 +55,17 @@ public final class Database: @unchecked Sendable {
     /// trailing dot of a fully qualified name), is refused with
     /// ``RelateError/invalidParameter(_:)`` rather than opened as whatever
     /// local path its path component happens to spell.
-    public convenience init(url: URL, readOnly: Bool = false) throws(RelateError) {
+    public convenience init(
+        url: URL, readOnly: Bool = false, options: Options = Options()
+    ) throws(RelateError) {
+        try Database.requireLocalFile(url)
+        try self.init(path: url.path, readOnly: readOnly, options: options)
+    }
+
+    /// The package's rule for a URL that names a store: a `file:` URL with
+    /// no host, or `localhost`. Every entry point that takes a store URL
+    /// refuses any other through here.
+    static func requireLocalFile(_ url: URL) throws(RelateError) {
         guard url.isFileURL else {
             throw RelateError.invalidParameter(
                 "a store URL must be a file URL, got scheme \(quotedWire(url.scheme ?? ""))")
@@ -41,15 +75,26 @@ public final class Database: @unchecked Sendable {
             throw RelateError.invalidParameter(
                 "a store URL must name a local file, got host \(quotedWire(host))")
         }
-        try self.init(path: url.path, readOnly: readOnly)
+    }
+
+    /// Refuses `operation` on a database opened read-only: the one place
+    /// that refusal is worded.
+    func requireWritable(for operation: String) throws(RelateError) {
+        guard !isReadOnly else {
+            throw RelateError.misuse("\(operation) on a database opened read-only")
+        }
     }
 
     /// A fresh in-memory store.
-    public static func inMemory() throws(RelateError) -> Database {
-        try Database(path: ":memory:")
+    public static func inMemory(options: Options = Options()) throws(RelateError) -> Database {
+        try Database(path: ":memory:", options: options)
     }
 
-    private init(path: String, readOnly: Bool) throws(RelateError) {
+    private init(path: String, readOnly: Bool, options: Options) throws(RelateError) {
+        guard options.maxReaders >= 1 else {
+            throw RelateError.invalidParameter(
+                "a database needs at least one reader, got maxReaders \(options.maxReaders)")
+        }
         // The package links the library at build time, so a v1 library
         // already failed to link; this is the startup assert the v2
         // contract still asks for.
@@ -65,44 +110,90 @@ public final class Database: @unchecked Sendable {
                 : relate_database_open(uri, &out, &err)
         }
         try check(status, err, "opening the database at '\(path)'")
-        self.handle = try requireHandle(out, "relate_database_open")
+        let core = DatabaseCore(handle: try requireHandle(out, "relate_database_open"))
+        self.core = core
         self.path = path
         self.isReadOnly = readOnly
+        self.pool = ConnectionPool(maxReaders: options.maxReaders)
+    }
+
+    /// A new connection on the default namespace, `neo4j`.
+    public func connect() throws(RelateError) -> Connection {
+        try connect(namespace: .neo4j)
+    }
+
+    /// A new connection whose session namespace is `namespace` (ADR-0117):
+    /// one of the three fixed namespaces.
+    public func connect(namespace: DatabaseNamespace) throws(RelateError) -> Connection {
+        try connect(namespaceNamed: namespace.rawValue)
+    }
+
+    /// A new connection whose session namespace is named `namespace`
+    /// (`nil` is `neo4j`).
+    @available(*, deprecated, message: "the namespaces are fixed: pass a DatabaseNamespace to connect(namespace:)")
+    public func connect(namespace: String?) throws(RelateError) -> Connection {
+        try connect(namespaceNamed: namespace ?? DatabaseNamespace.neo4j.rawValue)
+    }
+
+    /// A caller-made connection on the namespace named `name`: it keeps this
+    /// database alive.
+    func connect(namespaceNamed name: String) throws(RelateError) -> Connection {
+        Connection(handle: try core.openSession(namespaceNamed: name), core: core, database: self, keeping: self)
+    }
+
+    /// A connection for the managed pool, on the default namespace. It
+    /// refers back to this database without keeping it alive: the database
+    /// owns the pool, so a pool connection that owned the database would
+    /// keep both alive for ever.
+    func connectManaged() throws(RelateError) -> Connection {
+        Connection(
+            handle: try core.openSession(namespaceNamed: DatabaseNamespace.neo4j.rawValue), core: core,
+            database: self, keeping: nil)
+    }
+
+    /// Writes a checkpoint and truncates the WAL.
+    public func checkpoint() throws(RelateError) {
+        try core.checkpoint(describing: path)
+    }
+}
+
+/// The open store handle, closed when its last holder — the `Database`
+/// object or any ``Connection`` — is released.
+///
+/// `@unchecked Sendable` because it stores an `OpaquePointer`; the C ABI
+/// documents a `relate_database` as safe to share across threads.
+final class DatabaseCore: @unchecked Sendable {
+    private let handle: OpaquePointer
+    /// The trace handler and commit subscribers every connection reports to.
+    let hub = ObserverHub()
+
+    init(handle: OpaquePointer) {
+        self.handle = handle
     }
 
     deinit {
+        hub.finish()
         // A close failure here has no caller to report to; the handle is
         // freed either way (poisoned handles included).
         _ = relate_database_close(handle)
     }
 
-    /// A new connection on the default namespace `neo4j`.
-    public func connect() throws(RelateError) -> Connection {
-        try connect(namespace: nil)
-    }
-
-    /// A new connection whose session namespace is `namespace` (ADR-0117),
-    /// typed: one of the three fixed namespaces.
-    public func connect(namespace: DatabaseNamespace) throws(RelateError) -> Connection {
-        try connect(namespace: namespace.rawValue)
-    }
-
-    /// A new connection whose session namespace is `namespace` (ADR-0117).
-    public func connect(namespace: String?) throws(RelateError) -> Connection {
+    /// The one crossing that opens a session, returning its handle. The
+    /// engine matches `name` against its fixed namespaces and refuses any
+    /// other.
+    func openSession(namespaceNamed name: String) throws(RelateError) -> OpaquePointer {
         var out: OpaquePointer?
         var err: UnsafeMutablePointer<CChar>? = nil
-        let status = try withOptionalCString(namespace, what: "namespace") {
+        let status = try withCString(name, what: "namespace") {
             relate_connect_namespace(handle, $0, &out, &err)
         }
-        try check(status, err, "connecting to namespace '\(namespace ?? "neo4j")'")
-        return Connection(handle: try requireHandle(out, "relate_connect_namespace"), database: self)
+        try check(status, err, "connecting to namespace '\(name)'")
+        return try requireHandle(out, "relate_connect_namespace")
     }
 
-    /// Writes a checkpoint and truncates the WAL.
-    public func checkpoint() throws(RelateError) {
+    func checkpoint(describing path: String) throws(RelateError) {
         var err: UnsafeMutablePointer<CChar>? = nil
-        try check(
-            relate_checkpoint(handle, &err), err, "checkpointing '\(path)'")
+        try check(relate_checkpoint(handle, &err), err, "checkpointing '\(path)'")
     }
 }
 
@@ -111,31 +202,53 @@ public final class Database: @unchecked Sendable {
 /// one actor (or one thread) and open another for concurrent work.
 public final class Connection {
     private let handle: OpaquePointer
-    /// Keeps the database open for as long as this connection lives.
-    public let database: Database
+    /// Keeps the store open for as long as this connection lives.
+    let core: DatabaseCore
+    /// The database this connection was made from. Holding a connection
+    /// from ``Database/connect()`` keeps it open.
+    public unowned let database: Database
+    /// What keeps `database` alive: the database itself for a caller-made
+    /// connection. A connection the managed pool opened holds none: its
+    /// database owns it (through the pool) and outlives it, so it only
+    /// refers back.
+    private let owner: Database?
+    /// The counters of the open explicit transaction's statements: what its
+    /// commit reports to the database's commit stream. `begin` starts the
+    /// total, `commit` and `rollback` end it.
+    private var uncommittedStats = QueryStats.zero
 
-    fileprivate init(handle: OpaquePointer, database: Database) {
+    fileprivate init(handle: OpaquePointer, core: DatabaseCore, database: Database, keeping owner: Database?) {
         self.handle = handle
+        self.core = core
         self.database = database
+        self.owner = owner
     }
 
     deinit {
         _ = relate_disconnect(handle)
     }
 
-    /// Changes the session namespace; only allowed between transactions.
+    /// Changes the session namespace to one of the three fixed namespaces;
+    /// only allowed between transactions.
+    public func setNamespace(_ namespace: DatabaseNamespace) throws(RelateError) {
+        try setNamespace(named: namespace.rawValue)
+    }
+
+    /// Changes the session namespace, by name; only allowed between
+    /// transactions.
+    @available(*, deprecated, message: "the namespaces are fixed: pass a DatabaseNamespace to setNamespace(_:)")
     public func setNamespace(_ name: String) throws(RelateError) {
+        try setNamespace(named: name)
+    }
+
+    /// The one crossing that changes the session namespace; the engine
+    /// refuses a name outside its fixed namespaces.
+    func setNamespace(named name: String) throws(RelateError) {
         var err: UnsafeMutablePointer<CChar>? = nil
         let status = try withCString(name, what: "namespace") {
             relate_conn_set_namespace(handle, $0, &err)
         }
         try check(status, err, "setting the namespace to '\(name)'")
-    }
-
-    /// Changes the session namespace to one of the three fixed namespaces;
-    /// only allowed between transactions.
-    public func setNamespace(_ namespace: DatabaseNamespace) throws(RelateError) {
-        try setNamespace(namespace.rawValue)
     }
 
     /// Runs one statement. An empty `parameters` binds none; otherwise each
@@ -144,6 +257,33 @@ public final class Connection {
     /// full-range integers all bind.
     @discardableResult
     public func query(_ cypher: String, _ parameters: [String: CypherValue] = [:])
+        throws(RelateError) -> QueryResult
+    {
+        try core.hub.observing(cypher, parameters) { () throws(RelateError) in
+            let result = try execute(cypher, parameters)
+            // Part of the observed step, so an auto-commit statement's
+            // commit is published before the trace handler hears of it.
+            noteCommitted(result)
+            return result
+        }
+    }
+
+    /// Commit bookkeeping for one successful statement. A bookmark is the
+    /// engine saying the statement committed by itself (auto-commit), and
+    /// that commit is published; without one, its counters wait for the
+    /// commit of the transaction it ran in.
+    private func noteCommitted(_ result: QueryResult) {
+        if let bookmark = result.bookmark {
+            core.hub.publish(Commit(bookmark: bookmark, stats: result.stats, tags: []))
+        } else {
+            uncommittedStats = uncommittedStats + result.stats
+        }
+    }
+
+    /// The statement itself, unobserved: bind, cross, check, copy out. The
+    /// package's own housekeeping statements (the poison probe) run here,
+    /// so they reach neither a trace nor the commit bookkeeping.
+    func execute(_ cypher: String, _ parameters: [String: CypherValue] = [:])
         throws(RelateError) -> QueryResult
     {
         let params: OpaquePointer? = try parameters.isEmpty ? nil : bindParameters(parameters)
@@ -166,9 +306,25 @@ public final class Connection {
         return try QueryResult.materialize(result)
     }
 
+    /// Runs one statement with Swift values as parameters: each converts
+    /// through ``CypherValueConvertible`` — strings, numbers, optionals
+    /// (`nil` is `null`), arrays, string-keyed dictionaries, `Date`, `URL`,
+    /// `UUID` and the typed structs.
+    ///
+    /// Disfavored so that a dictionary of literals keeps resolving to the
+    /// `[String: CypherValue]` entry point, with no conversion pass.
+    @_disfavoredOverload
+    @discardableResult
+    public func query(_ cypher: String, _ parameters: [String: any CypherValueConvertible])
+        throws(RelateError) -> QueryResult
+    {
+        try query(cypher, try convertParameters(parameters))
+    }
+
     public func begin() throws(RelateError) {
         var err: UnsafeMutablePointer<CChar>? = nil
         try check(relate_conn_begin(handle, &err), err, "beginning the transaction")
+        uncommittedStats = .zero
     }
 
     /// Commits the explicit transaction and returns its bookmark
@@ -178,6 +334,17 @@ public final class Connection {
     /// typed engine error — e.g. a retryable write conflict (ADR-0439).
     @discardableResult
     public func commit() throws(RelateError) -> String? {
+        try commit(tags: [])
+    }
+
+    /// `commit()`, with the `tags` its commit carries to the database's
+    /// commit stream.
+    @discardableResult
+    func commit(tags: Set<String>) throws(RelateError) -> String? {
+        // The transaction's bookkeeping ends here, whether or not the
+        // commit succeeds.
+        let stats = uncommittedStats
+        uncommittedStats = .zero
         var bookmark: UnsafeMutablePointer<CChar>? = nil
         var err: UnsafeMutablePointer<CChar>? = nil
         try check(
@@ -186,32 +353,14 @@ public final class Connection {
         // means the transaction committed nothing (ADR-0510).
         guard let bookmark else { return nil }
         defer { relate_free_string(bookmark) }
-        return try required(bookmark, "the commit's bookmark")
+        let text = try required(bookmark, "the commit's bookmark")
+        core.hub.publish(Commit(bookmark: text, stats: stats, tags: tags))
+        return text
     }
 
     public func rollback() throws(RelateError) {
+        uncommittedStats = .zero
         var err: UnsafeMutablePointer<CChar>? = nil
         try check(relate_conn_rollback(handle, &err), err, "rolling back the transaction")
-    }
-
-    /// Runs `body` in an explicit transaction: commits when it returns,
-    /// rolls back and rethrows when it throws — and likewise when the commit
-    /// itself throws.
-    @discardableResult
-    public func transaction<T>(_ body: (Connection) throws -> T) throws -> T {
-        try begin()
-        let value: T
-        do {
-            value = try body(self)
-            try commit()
-        } catch {
-            // The first error (the body's, or the commit's) is the one worth
-            // surfacing; a rollback failure after it would only mask the
-            // cause, and a throwing commit must not leave the connection
-            // inside the failed transaction (LABS-957).
-            try? rollback()
-            throw error
-        }
-        return value
     }
 }

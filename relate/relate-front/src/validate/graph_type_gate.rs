@@ -41,7 +41,7 @@ fn note(gates: &mut GraphTypeGates, feature: PreviewFeature) {
 pub(crate) fn statement_graph_type_gates(stmt: &Statement) -> Result<GraphTypeGates, EngineError> {
     let mut gates: GraphTypeGates = Vec::new();
     let mut visit_clause = |clause: &Clause| -> Result<(), EngineError> {
-        for body in clause_graph_type_bodies(clause) {
+        if let Some(body) = clause_graph_type_body(clause) {
             inspect_body(body, &mut gates);
         }
         Ok(())
@@ -50,17 +50,17 @@ pub(crate) fn statement_graph_type_gates(stmt: &Statement) -> Result<GraphTypeGa
     Ok(gates)
 }
 
-/// The graph-type bodies a clause carries: `CREATE GRAPH TYPE`'s own body
+/// The graph-type body a clause carries: `CREATE GRAPH TYPE`'s own body
 /// and `ALTER CURRENT GRAPH TYPE`'s inline body (the `Named` target has
 /// no body of its own). Every other clause carries none.
-pub(super) fn clause_graph_type_bodies(clause: &Clause) -> Vec<&GraphTypeBody> {
+pub(super) fn clause_graph_type_body(clause: &Clause) -> Option<&GraphTypeBody> {
     match clause {
-        Clause::CreateGraphType(c) => vec![&c.body],
+        Clause::CreateGraphType(c) => Some(&c.body),
         Clause::AlterCurrentGraphType(c) => match &c.target {
-            relate_parser::AlterCurrentGraphTypeTarget::Body(body) => vec![body],
-            relate_parser::AlterCurrentGraphTypeTarget::Named(_) => Vec::new(),
+            relate_parser::AlterCurrentGraphTypeTarget::Body(body) => Some(body),
+            relate_parser::AlterCurrentGraphTypeTarget::Named(_) => None,
         },
-        _ => Vec::new(),
+        _ => None,
     }
 }
 

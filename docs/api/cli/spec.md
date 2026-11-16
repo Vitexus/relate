@@ -1072,12 +1072,15 @@ exactly which batches landed (exit 1; the partial report still prints).
 | `--rel-key TYPE:PROP[,PROP]` | constraint-derived | Merge key for one relationship type, overriding its constraint-derived key or supplying one where no relationship constraint exists (repeatable, one type each; composite keys included) |
 | `--unkeyed-labels ACTION` | `skip` | What happens to a label with no merge key: `skip` (reported and counted) or `create` (`CREATE` rows; non-idempotent. Relationship endpoints on such nodes are not key-addressable, so their rels are counted `unkeyed` and skipped) |
 | `--dry-run` | off | Print the plan — per-label/type counts, merge keys, statement shapes, batch counts, policies — without touching the remote |
-| `--json` | off | Print the run report as one JSON object (`entities` with `created`/`updated`/`skipped` by reason, `mergeKey`, `policy`, `statement`, `batches`, plus `statementsSent`/`rowsSent`/`bytesSent`/`elapsedMs`) instead of the table |
+| `--json` | off | Print the run report as one JSON object (`entities` with `created`/`updated`/`skipped` by reason, `mergeKey`, `policy`, `statement`, `batches`, plus `statementsSent`/`rowsSent`/`bytesSent`/`elapsedMs`) instead of the table. `policy` is `null` for a counted bucket (an unkeyed-skip label, an unkeyed-endpoint rel, the dangling bucket), which writes nothing and so has no policy |
 | `--allow-plaintext` | off | The same plaintext Basic-auth opt-in as `pull` (ADR-0122): permit `http://` to a non-loopback host, with a warning |
 
 The report (table by default, `--json` for agents) counts per entity:
 created, updated, skipped (`unkeyed` / `policy` / `remote-newer` /
 `dangling`) and `--updated-at` warning counts, plus the batch/byte totals.
+The policy column names the entity's scoped update policy; a counted bucket
+that writes nothing (unkeyed-skip, unkeyed-endpoint rel, dangling) shows
+`-` (table) / `null` (`--json`) instead of a policy it never applies.
 Idempotent re-push is the contract: running the same push twice lands the
 same remote state (under `add`/`skip`, `structural` rels, and `--updated-at`
 where applicable). Known limitation, stated by ADR-0401: the report does
@@ -1547,7 +1550,7 @@ noted):
 | Warning | Fires on | Message |
 | --- | --- | --- |
 | `CartesianProduct` | a multi-pattern `MATCH` whose patterns share no join anchor (no node variable appears in more than one pattern) | `the MATCH patterns share no join anchor` |
-| `AllNodesScan` | a label-less scan (`MATCH (n)`) while the store carries a property index — the message names the existing index as the suggestion | `the scan matches every node; consider the property index (:Label(property))` |
+| `AllNodesScan` | a label-less scan (`MATCH (n)`) while the store carries a property index — the message advises a label and names no index, since no index serves an unlabeled pattern | `the scan matches every node; add a label to narrow it` |
 | `LabelDisjunctionScan` | a folded label disjunction no seek serves (LABS-1083) — the scan answers per disjunct label, never every node; the message names the predicate's own per-label `:Label(property)` pairs as the suggestion, never an unrelated store index | `the disjunction scan answers per label; consider the property index (:Model(id), :Source(id))` |
 | `EstimationMiss` | `PROFILE` only: an operator whose estimate overshoots its actual rows by 10x or more — the same policy that flags the `Est/Actual` cell with `!` | `estimated rows 10x or more above the actual rows` |
 

@@ -602,6 +602,7 @@ test-release-scripts:
 	$(PYTHON) $(CURDIR)/scripts/tests/test_pom_py.py
 	$(PYTHON) $(CURDIR)/scripts/tests/test_npm_json.py
 	$(PYTHON) $(CURDIR)/scripts/tests/test_changelog_rotate.py
+	$(PYTHON) $(CURDIR)/scripts/tests/test_third_party_licenses.py
 	sh $(CURDIR)/scripts/tests/test_release_bump.sh
 	sh $(CURDIR)/scripts/tests/test_release_advance.sh
 	sh $(CURDIR)/scripts/tests/test_toml_sh.sh

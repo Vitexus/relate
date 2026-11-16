@@ -3,6 +3,16 @@ import Testing
 
 @testable import Relate
 
+/// A raw-value type whose conversion echoes the raw value it was offered.
+private enum HostileRawValue: String, CypherValueConvertible {
+    case calm
+}
+
+/// A raw-value type decoded by Foundation, whose error quotes the raw value.
+private enum HostileDecodable: String, Decodable {
+    case calm
+}
+
 @Suite struct MetadataTests {
     let conn = try! Database.inMemory().connect()
 
@@ -114,6 +124,25 @@ import Testing
         } catch {
             assertSanitized(error.message)
         }
+        // A result mismatch names a column, a map key and sometimes the
+        // value itself, all of which come from the engine's result.
+        let record = Record(
+            index: ColumnIndex([hostile]), values: [.map([hostile: .string(hostile)])])
+        let nested = try resultMismatch { _ = try record.get(hostile, as: [String: Int].self) }
+        let absent = try resultMismatch { _ = try record.get("absent", as: Int.self) }
+        let raw = try resultMismatch { _ = try HostileRawValue(cypherValue: .string(hostile)) }
+        let decoded = try resultMismatch {
+            _ = try CypherValueDecoder().decode(HostileDecodable.self, from: .string(hostile))
+        }
+        // The fields hold the strings as they are; only the message is sanitized.
+        #expect(nested.path == [hostile, hostile])
+        #expect(absent.path == ["absent"])
+        #expect(raw.reason?.contains(hostile) == true && decoded.reason?.contains(hostile) == true)
+        for mismatch in [nested, absent, raw, decoded] {
+            assertSanitized(mismatch.message)
+            #expect(mismatch.message.contains("\\u000d\\u000a"))
+            #expect(RelateError.unexpectedResult(mismatch).message == mismatch.message)
+        }
         let jsonHostile = "INFO\\r\\nFAKE\\u2028\\u0000"
         do {
             _ = try decodeMetadata(
@@ -159,11 +188,14 @@ import Testing
         #expect(try conn.query("RETURN 1").namespace == .neo4j)
         #expect(try conn.query("USE system SHOW DATABASES YIELD name RETURN name").namespace == .system)
         #expect(try conn.query("RETURN 1").namespace == .neo4j)
-        try conn.setNamespace("system")
+        try conn.setNamespace(.system)
         #expect(try conn.query("SHOW DATABASES").namespace == .system)
-        let sys = try conn.database.connect(namespace: "system")
+        let sys = try conn.database.connect(namespace: .system)
         #expect(try sys.query("SHOW DATABASES").namespace == .system)
-        #expect(throws: RelateError.self) { try conn.database.connect(namespace: "nope") }
+        // The engine owns the vocabulary: a name outside it is refused at
+        // the crossing both typed entry points share.
+        #expect(throws: RelateError.self) { try conn.database.connect(namespaceNamed: "nope") }
+        #expect(throws: RelateError.self) { try conn.setNamespace(named: "nope") }
         // The typed forms name the same namespaces.
         let typed = try conn.database.connect(namespace: .system)
         #expect(try typed.query("SHOW DEFAULT DATABASE").namespace == .system)

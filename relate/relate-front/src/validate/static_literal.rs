@@ -9,6 +9,8 @@ use relate_core::Value;
 use relate_error::{EngineError, ErrorKind};
 use relate_parser::{Expr, LiteralValue};
 
+use crate::ast::tree::unparen;
+
 /// The statically-known type of an expression Relate can decide without
 /// evaluating it: a literal (list and map literals included), arithmetic and
 /// unary operators over such operands, comparisons, and boolean operators.
@@ -91,14 +93,6 @@ pub(super) fn static_literal_type(expr: &Expr) -> Option<StaticLitType> {
     }
 }
 
-/// Strip wrapping parentheses.
-pub(super) fn unparen(expr: &Expr) -> &Expr {
-    match expr {
-        Expr::Paren(inner) => unparen(inner),
-        other => other,
-    }
-}
-
 /// The statically-known *value* an expression spells: a literal, a list
 /// literal of them, a sign over one, and a plan-cache placeholder (ADR-0503).
 /// A caller's own parameter and every non-literal expression are `None`.
@@ -120,6 +114,24 @@ pub(super) fn static_value(expr: &Expr) -> Option<Value> {
             Value::Float(value) => Some(Value::Float(-value)),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// The statically-known integer value of `expr` ([`static_value`] projected
+/// to `i64`); `None` for anything else.
+pub(super) fn static_int_value(expr: &Expr) -> Option<i64> {
+    match static_value(expr)? {
+        Value::Int(value) => Some(value),
+        _ => None,
+    }
+}
+
+/// The statically-known string value of `expr` ([`static_value`] projected
+/// to a string); `None` for anything else.
+pub(super) fn static_string_value(expr: &Expr) -> Option<String> {
+    match static_value(expr)? {
+        Value::String(value) => Some(value.to_string()),
         _ => None,
     }
 }
@@ -161,23 +173,30 @@ pub(super) fn non_numeric_leaf_class(ty: StaticLitType) -> bool {
     !ty.is_numeric() && ty != StaticLitType::Null
 }
 
+/// The types an integer argument site admits as a statically-known literal:
+/// the integer itself.
+pub(super) const INTEGER_ONLY: &[StaticLitType] = &[StaticLitType::Integer];
+
+/// [`INTEGER_ONLY`] plus a literal NULL, which the runtime owns per row.
+pub(super) const INTEGER_OR_NULL: &[StaticLitType] = &[StaticLitType::Integer, StaticLitType::Null];
+
 /// The one spelling of "this argument must be an integer": reject a
-/// statically-known *literal* (or plan-cache placeholder) of any other type.
-/// `allow_null` says whether a literal NULL is a legitimate value at the site
-/// (deferred to the runtime, which owns the per-row decision) or a
-/// compile-time type error (CIP-34's concurrency value). An expression whose
-/// value the fold declines — a variable, a parameter, a constant
+/// statically-known *literal* (or plan-cache placeholder) whose type is
+/// outside `allowed` ([`INTEGER_ONLY`] or [`INTEGER_OR_NULL`] — a literal
+/// NULL is either deferred to the runtime, which owns the per-row decision,
+/// or a compile-time type error, CIP-34's concurrency value). An expression
+/// whose value the fold declines — a variable, a parameter, a constant
 /// *expression* — keeps its runtime decision (ADR-0175's recorded deviation
 /// for `SKIP 0.0/0.0`).
 pub(super) fn require_integer_argument(
     expr: &Expr,
     what: &str,
-    allow_null: bool,
+    allowed: &[StaticLitType],
 ) -> Result<(), EngineError> {
     let Some(ty) = static_value(expr).and_then(|value| StaticLitType::of_value(&value)) else {
         return Ok(());
     };
-    if ty == StaticLitType::Integer || (allow_null && ty == StaticLitType::Null) {
+    if allowed.contains(&ty) {
         return Ok(());
     }
     Err(EngineError::semantic(
@@ -186,32 +205,43 @@ pub(super) fn require_integer_argument(
     ))
 }
 
-/// The *class* of an expression whose type is statically known, for CIP-271's
-/// list gate: INTEGER and FLOAT unify into one numeric class (`[1, 2.0]` is a
-/// homogeneous `LIST<NUMBER>`), every other type keeps its own class. `None`
-/// means the type is not statically known (a variable, parameter, property
-/// read, function result) or is null — both make the list `LIST<ANY>`.
-fn static_literal_class(expr: &Expr) -> Option<StaticLitType> {
+/// The element class of CIP-271's list gate: INTEGER and FLOAT unify into one
+/// numeric class (`[1, 2.0]` is a homogeneous `LIST<NUMBER>`), every other
+/// statically known type keeps its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ElementClass {
+    Numeric,
+    Of(StaticLitType),
+}
+
+/// The [`ElementClass`] of an expression whose type is statically known.
+/// `None` means the type is not statically known (a variable, parameter,
+/// property read, function result) or is null — both make the list
+/// `LIST<ANY>`.
+fn static_element_class(expr: &Expr) -> Option<ElementClass> {
     match static_literal_type(expr)? {
-        StaticLitType::Integer | StaticLitType::Float => Some(StaticLitType::Integer),
+        StaticLitType::Integer | StaticLitType::Float => Some(ElementClass::Numeric),
         StaticLitType::Null => None,
-        other => Some(other),
+        other => Some(ElementClass::Of(other)),
     }
 }
 
-/// The class of a list *literal* whose elements are all statically known and
-/// share one class — the `LIST<T>` CIP-271 rejects for `toString()`. `None`
-/// for anything else: an empty list, a null or dynamically typed element,
-/// elements of more than one class, or a non-literal expression. All of those
-/// are `LIST<ANY>` (or not a list at all) and are left to the runtime.
-pub(super) fn homogeneous_list_literal_class(list: &Expr) -> Option<StaticLitType> {
+/// Whether `list` is a list *literal* whose elements are all statically known
+/// and share one [`ElementClass`] — the `LIST<T>` CIP-271 rejects for
+/// `toString()`. `false` for anything else: an empty list, a null or
+/// dynamically typed element, elements of more than one class, or a
+/// non-literal expression. All of those are `LIST<ANY>` (or not a list at
+/// all) and are left to the runtime.
+pub(super) fn is_homogeneous_list_literal(list: &Expr) -> bool {
     match unparen(list) {
         Expr::List(items) if !items.is_empty() => {
-            let mut classes = items.iter().map(static_literal_class);
-            let first = classes.next()??;
-            classes.all(|class| class == Some(first)).then_some(first)
+            let mut classes = items.iter().map(static_element_class);
+            let Some(Some(first)) = classes.next() else {
+                return false;
+            };
+            classes.all(|class| class == Some(first))
         }
-        _ => None,
+        _ => false,
     }
 }
 

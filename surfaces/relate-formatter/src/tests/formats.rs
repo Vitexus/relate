@@ -351,6 +351,23 @@ fn table_mode_boxes_each_explain_plan_line() {
 }
 
 #[test]
+fn table_mode_escapes_a_control_character_in_a_details_cell() {
+    // LABS-825: a string seek bound carries the statement's own text into
+    // the `Details` line, raw; the table's one cell-escaping boundary
+    // spells the ESC exactly once and no raw control byte reaches the
+    // terminal.
+    let node = relate::PlanNode::new(
+        "NodeIndexSeek",
+        "RANGE INDEX n:Person(name) WHERE name = 'a\u{1b}[31mb'".to_string(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let s = render_plan(Mode::Table, &[], &[], &PlanFixture::of(&node), &[]);
+    assert!(s.contains("name = 'a\\u{1B}[31mb'"), "{s}");
+    assert!(!s.contains('\u{1b}'), "raw ESC leaked: {s:?}");
+}
+
+#[test]
 fn table_mode_renders_profile_metric_columns() {
     // ADR-0344 phase 2 + metric fields: a PROFILE tree (a node carrying
     // metrics) renders the `Rows | Time (ms) | Db Hits | Memory (Bytes)`
@@ -601,7 +618,7 @@ fn table_mode_renders_the_warnings_column_and_footer_line() {
 #[test]
 fn table_mode_escapes_the_warnings_footer() {
     // The footer embeds the same warning texts as the `Warnings` cells, and
-    // `AllNodesScan` carries catalog index text — a control sequence in an
+    // `LabelDisjunctionScan` carries catalog index text — a control sequence in an
     // index label must not reach the terminal raw.
     let cols = vec!["plan".to_string()];
     let rows = vec![
@@ -614,8 +631,8 @@ fn table_mode_escapes_the_warnings_footer() {
         Vec::new(),
         vec![
             relate::PlanNode::new("AllNodesScan", "(n)".to_string(), Vec::new(), Vec::new())
-                .with_warnings(vec![relate::PlanWarning::AllNodesScan {
-                    index: ":Person(\u{1b}[31m)".to_string(),
+                .with_warnings(vec![relate::PlanWarning::LabelDisjunctionScan {
+                    indexes: ":Person(\u{1b}[31m)".to_string(),
                 }]),
         ],
     );

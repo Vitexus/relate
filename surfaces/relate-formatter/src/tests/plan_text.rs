@@ -166,16 +166,14 @@ fn typed_warnings_render_beside_the_operator_and_in_the_footer() {
     let labelless = text_of(&mut conn, "EXPLAIN MATCH (n) RETURN n");
     assert!(
         labelless.iter().any(|l| l.contains("AllNodesScan")
-            && l.contains(
-                "the scan matches every node; consider the property index (:Person(name))"
-            )),
-        "the AllNodesScan warning names the existing property index: {labelless:?}"
+            && l.contains("the scan matches every node; add a label to narrow it")),
+        "the AllNodesScan warning advises a label: {labelless:?}"
     );
     assert!(
         labelless
             .iter()
-            .any(|l| l.starts_with("Warnings: Id ") && l.contains(":Person(name)")),
-        "the footer names the suggested index: {labelless:?}"
+            .any(|l| l.starts_with("Warnings: Id ") && l.contains("add a label to narrow it")),
+        "the footer names the affected operator's advice: {labelless:?}"
     );
 }
 

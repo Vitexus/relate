@@ -29,12 +29,58 @@ pub(crate) use literal::float_integer_site;
 use literal::{is_non_integer_literal, is_static_non_bool};
 use shadowing::{reject_binding_shadowing, reject_projection_shadowing};
 
+/// Where an expression sits, which decides the two policies a position
+/// carries: whether a pattern expression is legal there, and whether a
+/// statically non-boolean operand is rejected. A boolean position reads a
+/// predicate, so a pattern expression is legal even in a projection (`RETURN
+/// NOT ()--()`), exactly as the front end's projection rule allows.
+#[derive(Clone, Copy)]
+enum ExprPos {
+    /// An ordinary value position.
+    Value,
+    /// A position that reads a boolean, named by the context whose
+    /// requirement a static non-boolean operand violates (`AND`, `NOT`,
+    /// `predicate`, ...).
+    Boolean(&'static str),
+}
+
+impl ExprPos {
+    fn allows_pattern_pred(self) -> bool {
+        matches!(self, ExprPos::Boolean(_))
+    }
+
+    /// The position `expr`'s operands enter: a boolean connective or `NOT`
+    /// reads booleans, every other node reads values.
+    fn of_operands(expr: &Expr) -> Self {
+        match expr {
+            Expr::Unary {
+                op: UnaryOp::Not, ..
+            } => ExprPos::Boolean("NOT"),
+            Expr::Binary { op, .. } if op.is_boolean() => ExprPos::Boolean(op.as_str()),
+            _ => ExprPos::Value,
+        }
+    }
+
+    /// The compile-time rejection of a statically non-boolean operand in a
+    /// boolean position (live Neo4j: `RETURN 1 AND true` is a
+    /// SyntaxException). A value of runtime-decided type keeps the runtime
+    /// TypeError.
+    fn reject_static_non_bool(self, expr: &Expr) -> Result<()> {
+        match self {
+            ExprPos::Boolean(context) if is_static_non_bool(expr) => {
+                Err(Error::static_requires_boolean(context))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 pub(crate) fn check_expr(
     env: &Env,
     is_write_procedure: &mut impl FnMut(&str) -> bool,
     expr: &Expr,
 ) -> Result<()> {
-    check_expr_ctx(env, is_write_procedure, expr, false)
+    check_expr_ctx(env, is_write_procedure, expr, ExprPos::Value)
 }
 
 pub(crate) fn check_pred(
@@ -48,9 +94,8 @@ pub(crate) fn check_pred(
     // `MATCH (n) WHERE n` are both `Neo.ClientError.Statement.SyntaxError`).
     // A value whose type is only known per row keeps the runtime TypeError
     // (`bool_or_null`).
-    if is_static_non_bool(expr) {
-        return Err(Error::static_requires_boolean("predicate"));
-    }
+    let pos = ExprPos::Boolean("predicate");
+    pos.reject_static_non_bool(expr)?;
     if let Expr::Variable(v) = expr {
         if matches!(
             env.get_name(v),
@@ -62,7 +107,7 @@ pub(crate) fn check_pred(
             .into_syntax());
         }
     }
-    check_expr_ctx(env, is_write_procedure, expr, true)
+    check_expr_ctx(env, is_write_procedure, expr, pos)
 }
 
 pub(crate) fn is_delete_target(expr: &Expr) -> bool {
@@ -228,21 +273,11 @@ fn check_subquery_expression(
     query_output_names_with_seed(&scoped_query, imported, &std::collections::HashSet::new())
 }
 
-/// ADR-0175: reject a float literal at the integer site `expr` carries,
-/// naming that site's authored detail ([`float_integer_site`] owns the
-/// list).
-fn reject_float_integer_site(expr: &Expr) -> Result<()> {
-    match float_integer_site(expr) {
-        Some(site) => Err(Error::invalid_argument_type(site.type_error)),
-        None => Ok(()),
-    }
-}
-
 fn check_expr_ctx(
     env: &Env,
     is_write_procedure: &mut impl FnMut(&str) -> bool,
     expr: &Expr,
-    allow_pattern_pred: bool,
+    pos: ExprPos,
 ) -> Result<()> {
     match expr {
         Expr::Variable(v) => {
@@ -260,15 +295,15 @@ fn check_expr_ctx(
             }
             expr.try_each_child(&mut |child| check_expr(env, &mut *is_write_procedure, child))?;
         }
-        Expr::Unary { op, .. } => {
-            // A boolean-operand position reads a predicate, so a pattern
-            // expression is legal there even in a projection (`RETURN NOT
-            // ()--()`), exactly as the front end's projection rule allows.
-            let child = matches!(op, UnaryOp::Not);
-            expr.try_each_child(&mut |c| check_expr_ctx(env, &mut *is_write_procedure, c, child))?;
+        Expr::Unary { .. } => {
+            let operand_pos = ExprPos::of_operands(expr);
+            expr.try_each_child(&mut |c| {
+                check_expr_ctx(env, &mut *is_write_procedure, c, operand_pos)?;
+                operand_pos.reject_static_non_bool(c)
+            })?;
         }
         Expr::Binary { op, left, right } => {
-            check_binary(env, is_write_procedure, *op, left, right)?;
+            check_binary(env, is_write_procedure, expr, *op, left, right)?;
         }
         Expr::Case {
             when_then,
@@ -276,10 +311,10 @@ fn check_expr_ctx(
         } => {
             for (when, then) in when_then {
                 check_pred(env, is_write_procedure, when)?;
-                check_expr_ctx(env, is_write_procedure, then, allow_pattern_pred)?;
+                check_expr_ctx(env, is_write_procedure, then, pos)?;
             }
             if let Some(e) = else_expr {
-                check_expr_ctx(env, is_write_procedure, e, allow_pattern_pred)?;
+                check_expr_ctx(env, is_write_procedure, e, pos)?;
             }
         }
         Expr::ListComp {
@@ -360,7 +395,7 @@ fn check_expr_ctx(
             check_pred(&inner, is_write_procedure, predicate)?;
         }
         Expr::PatternPred { path } => {
-            if !allow_pattern_pred {
+            if !pos.allows_pattern_pred() {
                 return Err(Error::syntax(
                     "UnexpectedSyntax: pattern predicates are only valid in WHERE",
                 ));
@@ -450,12 +485,12 @@ fn check_expr_ctx(
         // runtime (Neo4j's 22N27/22NB1 static gate fires at the same phase);
         // non-literal floats are handled at runtime.
         Expr::Subscript { expr: inner, index } => {
-            reject_float_integer_site(expr)?;
+            literal::reject_float_integer_site(expr)?;
             check_expr(env, is_write_procedure, inner)?;
             check_expr(env, is_write_procedure, index)?;
         }
         Expr::Slice { .. } => {
-            reject_float_integer_site(expr)?;
+            literal::reject_float_integer_site(expr)?;
             expr.try_each_child(&mut |child| check_expr(env, &mut *is_write_procedure, child))?;
         }
         // Every other variant (literals, parameters, label predicates,
@@ -505,7 +540,11 @@ fn check_call(
     // binding-kind / scope rules, and the temporal constructor
     // family's static construction check — one dispatch point.
     apply_function_meta(env, &n, args)?;
-    let child_pred = n == "exists";
+    let arg_pos = if n == "exists" {
+        ExprPos::Boolean("exists")
+    } else {
+        ExprPos::Value
+    };
     if is_agg_fn(&n) && args.iter().any(expr_contains_rand) {
         return Err(Error::syntax(
             "NonConstantExpression: aggregations cannot contain rand()",
@@ -515,7 +554,7 @@ fn check_call(
         if n == "property_exists" && index == 1 {
             continue;
         }
-        check_expr_ctx(env, is_write_procedure, a, child_pred)?;
+        check_expr_ctx(env, is_write_procedure, a, arg_pos)?;
     }
     Ok(())
 }
@@ -525,6 +564,7 @@ fn check_call(
 fn check_binary(
     env: &Env,
     is_write_procedure: &mut impl FnMut(&str) -> bool,
+    expr: &Expr,
     op: BinaryOp,
     left: &Expr,
     right: &Expr,
@@ -539,16 +579,14 @@ fn check_binary(
     if op.absorbing_constant(left, right).is_some() {
         return Ok(());
     }
-    let child = op.is_boolean();
+    let operand_pos = ExprPos::of_operands(expr);
     for c in [left, right] {
-        check_expr_ctx(env, is_write_procedure, c, child)?;
+        check_expr_ctx(env, is_write_procedure, c, operand_pos)?;
     }
-    // The boolean operators require boolean operands; a statically
-    // non-boolean operand is the compile-time SyntaxError class (live
-    // Neo4j: `RETURN 1 AND true` is a SyntaxException). A value of
-    // runtime-decided type keeps the runtime TypeError.
-    if child && [left, right].into_iter().any(is_static_non_bool) {
-        return Err(Error::static_requires_boolean(op.as_str()));
+    // The boolean operators require boolean operands: both operands are
+    // walked first, so a name error outranks the static type rejection.
+    for c in [left, right] {
+        operand_pos.reject_static_non_bool(c)?;
     }
     if op == BinaryOp::In {
         if let Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) = right {
@@ -607,6 +645,15 @@ mod tests {
         let err = check_expr(&env, &mut |_| false, &and).unwrap_err();
         assert!(matches!(err, Error::Syntax(_)), "{err:?}");
         assert!(err.to_string().contains("AND requires a boolean"), "{err}");
+
+        // `RETURN NOT 1` — the same static rule, uniformly for `NOT`.
+        let not = Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(Expr::Int(1)),
+        };
+        let err = check_expr(&env, &mut |_| false, &not).unwrap_err();
+        assert!(matches!(err, Error::Syntax(_)), "{err:?}");
+        assert!(err.to_string().contains("NOT requires a boolean"), "{err}");
     }
 
     /// ADR-0511 (LABS-400): a binary node the constant fold collapses

@@ -691,6 +691,15 @@ fn two_hop_min_max_avg_sum_answer_over_the_shape() {
     );
 }
 
+/// The ADR-0541 measurement protocol: reset the `get_id` counter, run
+/// `query` over the resolved plan, and return its result with the calls the
+/// run made.
+fn run_counting_get_id(g: &Graph, query: &str) -> (QueryResult, u64) {
+    let _ = crate::store::take_get_id_calls();
+    let result = exec_cypher_resolved(g, query);
+    (result, crate::store::take_get_id_calls())
+}
+
 /// ADR-0541: with the plan's tokens resolved, the fold's label checks and
 /// property reads take ids from the plan — `Interner::get_id` calls do not
 /// grow with the number of candidates.
@@ -717,10 +726,9 @@ fn path_fold_lookups_do_not_grow_with_candidates() {
                 .unwrap();
         }
         g.commit_write();
-        let _ = crate::store::take_get_id_calls();
-        let result = exec_cypher_resolved(&g, QUERY);
+        let (result, calls) = run_counting_get_id(&g, QUERY);
         assert_eq!(result.rows, vec![vec![Value::Int(comments)]]);
-        crate::store::take_get_id_calls()
+        calls
     };
     let small = lookups_for(10);
     let large = lookups_for(1000);
@@ -733,12 +741,20 @@ fn path_fold_lookups_do_not_grow_with_candidates() {
 /// number of candidates, in every predicate shape that carries the key.
 #[test]
 fn absent_property_key_reads_do_not_grow_with_candidates() {
-    for query in [
-        "MATCH (p:Person) WHERE p.ghost = 1 RETURN p",
-        "MATCH (p:Person) WHERE p.ghost IS NOT NULL RETURN p",
-        "MATCH (p:Person {ghost: 1}) RETURN p",
-        "MATCH (p:Person) WHERE p.ghost = 1 AND p.ID > 0 RETURN p.ID",
-        "MATCH (p:Person) WHERE p.ghost = 1 RETURN count(p.ghost)",
+    let none: Vec<Vec<Value>> = Vec::new();
+    for (query, expected) in [
+        ("MATCH (p:Person) WHERE p.ghost = 1 RETURN p", &none),
+        ("MATCH (p:Person) WHERE p.ghost IS NOT NULL RETURN p", &none),
+        ("MATCH (p:Person {ghost: 1}) RETURN p", &none),
+        (
+            "MATCH (p:Person) WHERE p.ghost = 1 AND p.ID > 0 RETURN p.ID",
+            &none,
+        ),
+        // An aggregate over no matching row still answers one zero row.
+        (
+            "MATCH (p:Person) WHERE p.ghost = 1 RETURN count(p.ghost)",
+            &vec![vec![Value::Int(0)]],
+        ),
     ] {
         let lookups_for = |people: i64| {
             let g = Graph::default();
@@ -747,12 +763,9 @@ fn absent_property_key_reads_do_not_grow_with_candidates() {
                 person_named(&g, id, "Ada", "Local");
             }
             g.commit_write();
-            let _ = crate::store::take_get_id_calls();
-            let result = exec_cypher_resolved(&g, query);
-            assert!(
-                result.rows.iter().all(|row| row[0] == Value::Int(0)) || result.rows.is_empty()
-            );
-            crate::store::take_get_id_calls()
+            let (result, calls) = run_counting_get_id(&g, query);
+            assert_eq!(&result.rows, expected, "{query}");
+            calls
         };
         assert_eq!(lookups_for(10), lookups_for(500), "{query}");
     }
@@ -784,10 +797,9 @@ fn absent_rel_and_pattern_map_keys_do_not_grow_with_candidates() {
                 .unwrap();
             }
             g.commit_write();
-            let _ = crate::store::take_get_id_calls();
-            let result = exec_cypher_resolved(&g, query);
+            let (result, calls) = run_counting_get_id(&g, query);
             assert!(result.rows.is_empty(), "{query}");
-            crate::store::take_get_id_calls()
+            calls
         };
         assert_eq!(lookups_for(10), lookups_for(500), "{query}");
     }

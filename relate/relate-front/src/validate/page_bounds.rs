@@ -11,14 +11,13 @@
 //!   for a non-integer or non-constant bound, so it deliberately skips the
 //!   other two checks.
 
-use relate_core::Value;
 use relate_error::{EngineError, ErrorKind};
 use relate_parser::{Clause, Expr, PageStage};
 
 use crate::ast::collect::expr_child_reaches_scope;
 use crate::ast::tree::try_expr_contains;
 
-use super::static_literal::{require_integer_argument, static_value};
+use super::static_literal::{require_integer_argument, static_int_value, INTEGER_OR_NULL};
 
 /// Whether an expression references any variable (a parameter is not a
 /// reference). Rides the shared scope-reach walk, so a variable inside a
@@ -120,7 +119,7 @@ fn check_page_constant(expr: &Expr, what: &str) -> Result<(), EngineError> {
 /// [`check_page_negative`], the negative half.
 fn check_page_value_domain(expr: &Expr, what: &str) -> Result<(), EngineError> {
     check_page_negative(expr)?;
-    require_integer_argument(expr, what, true)
+    require_integer_argument(expr, what, INTEGER_OR_NULL)
 }
 
 /// The negative-bound rejection alone (a direct sign or a plan-cache
@@ -128,7 +127,7 @@ fn check_page_value_domain(expr: &Expr, what: &str) -> Result<(), EngineError> {
 /// and half of the `RETURN`/`WITH` value-domain tier. The wording is
 /// `relate-core`'s one detail; this layer decides only the class.
 fn check_page_negative(expr: &Expr) -> Result<(), EngineError> {
-    if matches!(static_value(expr), Some(Value::Int(value)) if value < 0) {
+    if static_int_value(expr).is_some_and(|value| value < 0) {
         return Err(EngineError::semantic(
             ErrorKind::NegativeIntegerArgument,
             relate_core::NEGATIVE_PAGE_BOUND_DETAIL,

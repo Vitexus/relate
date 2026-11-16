@@ -15,7 +15,7 @@ use crate::ast::tree::{is_boolean_operator, walk_clause_list_tree, SubqueryDesce
 
 use super::static_arithmetic::{list_literal_all_non_numeric, predicate_applies_arithmetic_to_var};
 use super::static_literal::{
-    homogeneous_list_literal_class, require_static_type, static_type_outside, StaticLitType,
+    is_homogeneous_list_literal, require_static_type, static_type_outside, StaticLitType,
 };
 use super::static_reduce::check_reduce_temporal_arithmetic;
 
@@ -159,7 +159,7 @@ fn check_static_operator_types(e: &Expr) -> Result<(), EngineError> {
                     n.eq_ignore_ascii_case("tostring") || n.eq_ignore_ascii_case("tostringornull")
                 }) =>
         {
-            if homogeneous_list_literal_class(&fc.args[0]).is_some() {
+            if is_homogeneous_list_literal(&fc.args[0]) {
                 return Err(EngineError::semantic(
                     ErrorKind::InvalidArgumentValue,
                     "toString()",

@@ -81,6 +81,39 @@ extension EngineError {
     public var isWriteConflict: Bool { code == StatusCode.transactionOutdated }
 }
 
+/// What ``RelateError/unexpectedResult(_:)`` carries: a result that did not
+/// have the shape or type the caller asked for.
+public struct ResultMismatch: Sendable, Hashable {
+    /// Where: the column name, then any map keys and list positions
+    /// (`"[2]"`) below it. Empty for a whole-result shape (`single()`).
+    public let path: [String]
+    /// What was asked for: a Swift type name, or a shape (`exactly one record`).
+    public let expected: String
+    /// What was there: a value kind (`null`, `string`), or a shape.
+    public let found: String
+    /// Why an in-kind value still did not convert (`300 is out of range`),
+    /// or the text of the error a type's own `init(from:)` threw.
+    public let reason: String?
+
+    init(path: [String], expected: String, found: String, reason: String? = nil) {
+        self.path = path
+        self.expected = expected
+        self.found = found
+        self.reason = reason
+    }
+
+    /// The mismatch as one line of text. A column name, a map key and a
+    /// reason can echo strings that came from the engine's result, so each
+    /// is sanitized here as every echoed wire value is (non-printable
+    /// characters escaped, the length bounded); ``path`` and ``reason``
+    /// themselves hold the strings as they are.
+    public var message: String {
+        let place = path.isEmpty ? "" : path.map(safeWire).joined(separator: ".") + ": "
+        let why = reason.map { " (\(safeWire($0)))" } ?? ""
+        return "\(place)expected \(expected), found \(found)\(why)"
+    }
+}
+
 /// Every error the Swift surface throws.
 public enum RelateError: LocalizedError, Sendable, Equatable, CustomStringConvertible {
     /// The engine (or the C boundary) refused the call; the typed shape
@@ -90,12 +123,43 @@ public enum RelateError: LocalizedError, Sendable, Equatable, CustomStringConver
     case invalidParameter(String)
     /// The C ABI returned a payload that violates its documented contract.
     case decoding(String)
+    /// A result did not have the shape or type the caller asked for: a
+    /// typed record accessor, `single()`, `scalar()` or a `Decodable`
+    /// decode.
+    case unexpectedResult(ResultMismatch)
+    /// The API was used outside its contract: a transaction scope used after
+    /// its body returned, a write statement in a read, a write on a
+    /// read-only database.
+    case misuse(String)
 
-    public var message: String {
+    public var message: String { text.message }
+
+    /// Each case's label and message: the one place the cases are
+    /// enumerated for text.
+    private var text: (label: String, message: String) {
         switch self {
-        case .engine(let e): e.message
-        case .invalidParameter(let m), .decoding(let m): m
+        case .engine(let e): ("Relate: [\(e.code)]", e.message)
+        case .invalidParameter(let m): ("Relate invalid parameter:", m)
+        case .decoding(let m): ("Relate decoding error:", m)
+        case .unexpectedResult(let mismatch): ("Relate unexpected result:", mismatch.message)
+        case .misuse(let m): ("Relate misuse:", m)
         }
+    }
+
+    /// This error with `component` prefixed to its mismatch path: how a
+    /// container or record names where inside it a conversion failed. Any
+    /// other error is returned unchanged.
+    func nested(under component: String) -> RelateError {
+        nested(under: [component])
+    }
+
+    /// This error with a whole path prefixed to its mismatch path.
+    func nested(under path: [String]) -> RelateError {
+        guard case .unexpectedResult(let mismatch) = self, !path.isEmpty else { return self }
+        return .unexpectedResult(
+            ResultMismatch(
+                path: path + mismatch.path, expected: mismatch.expected,
+                found: mismatch.found, reason: mismatch.reason))
     }
 
     /// The typed shape when this is an `.engine` error, `nil` otherwise.
@@ -104,16 +168,10 @@ public enum RelateError: LocalizedError, Sendable, Equatable, CustomStringConver
     }
 
     /// Whether re-running the same work may succeed: the engine's own
-    /// verdict, `false` for the two client-side cases.
+    /// verdict, `false` for every client-side case.
     public var isRetryable: Bool { engineError?.retryable ?? false }
 
-    public var description: String {
-        switch self {
-        case .engine(let e): "Relate: [\(e.code)] \(e.message)"
-        case .invalidParameter(let m): "Relate invalid parameter: \(m)"
-        case .decoding(let m): "Relate decoding error: \(m)"
-        }
-    }
+    public var description: String { "\(text.label) \(text.message)" }
 
     /// What `error.localizedDescription` shows (otherwise Foundation prints
     /// "The operation couldn't be completed").

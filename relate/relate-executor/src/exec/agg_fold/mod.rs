@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use relate_core::{Result, Value};
 use relate_ir::{Clause, Expr, OrderItem, PathPattern, Projection};
 
-use crate::eval::{expr_vars, is_agg_expr};
+use crate::eval::is_agg_expr;
 use crate::group_key::GroupKey;
 use crate::overlay::{ExecGraph, MaterializeCache};
 use crate::row::Row;
@@ -58,12 +58,6 @@ pub(crate) fn fold_hop_vars(path: &PathPattern) -> HashSet<String> {
         }
     }
     v
-}
-
-pub(crate) fn expr_within(expr: &Expr, allowed: &HashSet<String>) -> bool {
-    let mut used = HashSet::new();
-    expr_vars(expr, &mut used);
-    used.iter().all(|x| allowed.contains(x))
 }
 
 #[cfg(test)]
@@ -160,7 +154,7 @@ pub(super) fn finish_folded_rows(
     output: &FoldOutput<'_>,
     mut out: Vec<Row>,
 ) -> Result<FoldedReturn> {
-    let (skip_n, limit_n) = resolve_page_bounds(graph, output.params, output.skip, output.limit)?;
+    let bounds = resolve_page_bounds(graph, output.params, output.skip, output.limit)?;
     if !output.order.is_empty() {
         // The folded row is the only row the fold kept: each key parks the
         // value of the item `folded_order_items` resolved for it, and the
@@ -178,11 +172,7 @@ pub(super) fn finish_folded_rows(
         sort_rows_by_parked_keys(&keys, &mut out, None)?;
         unpark_order_keys(&keys, &mut out);
     }
-    Ok(folded_return(
-        graph,
-        page(out, skip_n, limit_n),
-        output.items,
-    ))
+    Ok(folded_return(graph, page(out, bounds), output.items))
 }
 
 /// One projection item's rank within its half — the one classification

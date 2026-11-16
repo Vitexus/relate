@@ -1393,9 +1393,9 @@ The plan representation is the `PlanNode` tree:
   `None`, `id` at `0` and `warnings` empty). `warnings`
   (`Vec<PlanWarning>`) carries the typed warnings detected at tree
   construction: `PlanWarning::CartesianProduct` (a multi-pattern `MATCH`
-  whose patterns share no join anchor), `PlanWarning::AllNodesScan { index }`
-  (a label-less scan while the store carries a property index — `index` names
-  the existing index, e.g. `:Person(name)`, as the suggestion),
+  whose patterns share no join anchor), `PlanWarning::AllNodesScan`
+  (a label-less scan while the store carries a property index; it carries no
+  payload — the message advises a label),
   `PlanWarning::LabelDisjunctionScan { indexes }` (a folded label
   disjunction no seek serves, LABS-1083 — the scan answers per disjunct
   label; `indexes` names the predicate's own per-label `:Label(property)`

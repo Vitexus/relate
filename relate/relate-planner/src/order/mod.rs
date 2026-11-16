@@ -576,6 +576,28 @@ fn scale_degree(
     priced_degree(rows, start, rel, seed_is_start, stats, hop_rows).unwrap_or(rows)
 }
 
+/// How many relationship types a hop names: the one discriminator the
+/// hop-pricing sites share, so the "exactly one type" test cannot drift
+/// between them.
+enum RelTypes<'a> {
+    /// An untyped rel.
+    None,
+    /// Exactly one named type.
+    One(&'a NamedToken),
+    /// An alternation (`[:A|B]`).
+    Many,
+}
+
+impl<'a> RelTypes<'a> {
+    fn of(rel: &'a RelPattern) -> Self {
+        match rel.types.as_slice() {
+            [] => Self::None,
+            [one] => Self::One(one),
+            _ => Self::Many,
+        }
+    }
+}
+
 /// One hop's fanout for a kernel's cost gate (LABS-991): [`apply_degree`]'s
 /// price where the statistics can name one, and — where they cannot (an
 /// untyped rel, or a hop leaving an unlabeled node, which the walk model
@@ -601,9 +623,9 @@ pub fn apply_hop_bound(
     }
     // One named type rides that type's tail; untyped and alternated
     // (`[:A|B]`) rels ride the any-type tail, which bounds every type.
-    let rel_type = match rel.types.as_slice() {
-        [(rel_type, _)] => Some(rel_type),
-        _ => None,
+    let rel_type = match RelTypes::of(rel) {
+        RelTypes::One((rel_type, _)) => Some(rel_type),
+        RelTypes::None | RelTypes::Many => None,
     };
     stats
         .any_degree_tail(rel_type)
@@ -622,7 +644,7 @@ fn priced_degree(
     stats: &dyn PatternStats,
     hop_rows: HopRows,
 ) -> Option<u128> {
-    let [rel_type] = rel.types.as_slice() else {
+    let RelTypes::One(rel_type) = RelTypes::of(rel) else {
         return None;
     };
     // LABS-426 (the mean-to-tail flip): when the hop's seed rides the

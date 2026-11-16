@@ -1,0 +1,97 @@
+name: Third-party licenses
+
+# The license gate for what ships in a binary release (LABS-1690): the
+# shipped Rust closure (CLI, C ABI, Python, WASM; dev-dependencies out of
+# scope) is checked against deny.toml's Apache-2.0-compatible allow-list
+# and THIRDPARTY-NOTICES.md is checked for drift.
+#
+# Report-only for now: a violation or drift is a warning annotation and a
+# job-summary entry, never a red job — flip `enforce` (the dispatch input,
+# or the `enforce` default below once a few releases show the check never
+# false-fails). A missing tool or an unreadable cargo-about run always
+# fails: a gate that cannot run must not pass silently.
+#
+# release.yml calls this early; dispatch it by hand for a dry run:
+#   gh workflow run third-party-licenses.yml [-f enforce=true]
+# It also runs on pull requests that touch the lockfile or the license
+# inputs, so a dependency change reports its license impact (and a stale
+# notices file) before merge — still report-only.
+on:
+  pull_request:
+    paths:
+      - Cargo.lock
+      - deny.toml
+      - about.toml
+      - THIRDPARTY-NOTICES.md
+      - scripts/third-party-licenses.py
+      - .github/workflows/third-party-licenses.yml
+  workflow_call:
+    inputs:
+      enforce:
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      enforce:
+        description: "Fail the job on a license-policy violation (default: warn only)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  DO_NOT_TRACK: "1"
+  # Tool pins: bump deliberately, the notices format follows cargo-about.
+  CARGO_ABOUT_VERSION: "0.9.2"
+  CARGO_DENY_VERSION: "0.20.2"
+
+jobs:
+  licenses:
+    name: License policy and third-party notices
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The tools are built with the runner's stable cargo, not the repo's
+      # 1.88 MSRV pin; the pinned toolchain still resolves the workspace
+      # metadata they read.
+      - name: Install cargo-about and cargo-deny
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          # One install per tool, each verified: a combined install of two
+          # crates left only cargo-deny on the runner (run 43641050778), and
+          # cargo-about ships its binary only behind the `cli` feature.
+          cargo +stable install --locked cargo-about --version "=${CARGO_ABOUT_VERSION}" --features cli
+          cargo +stable install --locked cargo-deny --version "=${CARGO_DENY_VERSION}"
+          cargo-about --version
+          cargo-deny --version
+
+      - name: Check the notices and the license policy
+        env:
+          ENFORCE: ${{ inputs.enforce || false }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$ENFORCE" = "true" ]; then args+=(--enforce); fi
+          python3 scripts/third-party-licenses.py all "${args[@]}" 2>&1 | tee licenses.log
+          {
+            echo "### Third-party licenses"
+            echo
+            echo '```'
+            cat licenses.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The freshly generated notices, for inspection and for a quick
+      # fix when the drift warning fires.
+      - name: Generate the notices
+        run: python3 scripts/third-party-licenses.py notices > generated-THIRDPARTY-NOTICES.md
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: third-party-notices
+          path: generated-THIRDPARTY-NOTICES.md

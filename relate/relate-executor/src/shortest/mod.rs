@@ -7,6 +7,9 @@
 //! - [`Search::dag`]: a layered single-source BFS that keeps shortest-path
 //!   predecessors, with [`layered::Dag::trails`] enumerating them, and
 //!   [`Search::closed`] for the shortest closed trails through one node.
+//! - [`class_walk::ClassWalk`]: the trails of one exact length between two
+//!   nodes, the class enumeration of `SHORTEST k` and `SHORTEST k GROUPS`
+//!   (ADR-0607).
 //! - [`Search::pair_trails`]: the pair answer as trails; an all-path
 //!   search grows a layered DAG from each end and joins them where they
 //!   meet (ADR-0601), sharing the layer step with [`Search::dag`].
@@ -24,6 +27,7 @@ use relate_ir::{Direction, NodePattern, PathPattern, RelPattern};
 use crate::overlay::ExecGraph;
 use crate::store::RelTypes;
 
+pub(crate) mod class_walk;
 pub(crate) mod layered;
 mod pair;
 mod reach;
@@ -142,12 +146,23 @@ impl Search<'_, '_> {
 
     /// Call `f` with each relationship followed out of `node` and the node
     /// it reaches.
-    fn each_hop(&self, node: NodeId, mut f: impl FnMut(NodeId, RelId) -> Result<()>) -> Result<()> {
+    fn each_hop(&self, node: NodeId, f: impl FnMut(NodeId, RelId) -> Result<()>) -> Result<()> {
+        self.each_hop_along(self.dir, node, f)
+    }
+
+    /// [`Self::each_hop`] along `dir` instead of the search's own direction:
+    /// one search value serves a walk and the balls grown against it.
+    fn each_hop_along(
+        &self,
+        dir: Direction,
+        node: NodeId,
+        mut f: impl FnMut(NodeId, RelId) -> Result<()>,
+    ) -> Result<()> {
         let graph = self.graph;
         // The hop spelling: the walk yields the peer from the one
         // version-chain read it already makes, instead of a rel walk plus
         // a `hop` lookup per followed relationship.
-        graph.try_for_each_hop_resolved(node, self.dir, &self.types, |rid, next| {
+        graph.try_for_each_hop_resolved(node, dir, &self.types, |rid, next| {
             graph.cancel_tick()?;
             note_expand();
             f(next, rid)
@@ -156,8 +171,13 @@ impl Search<'_, '_> {
 
     /// Every relationship followed out of `node`, with the node it reaches.
     pub(crate) fn hops(&self, node: NodeId) -> Result<Vec<(NodeId, RelId)>> {
+        self.hops_along(self.dir, node)
+    }
+
+    /// [`Self::hops`] along `dir`.
+    fn hops_along(&self, dir: Direction, node: NodeId) -> Result<Vec<(NodeId, RelId)>> {
         let mut out = Vec::new();
-        self.each_hop(node, |next, rid| {
+        self.each_hop_along(dir, node, |next, rid| {
             out.push((next, rid));
             Ok(())
         })?;
@@ -175,9 +195,7 @@ pub(crate) fn followable(start: &NodePattern, rel: &RelPattern, end: &NodePatter
             .as_ref()
             .is_none_or(|e| e.is_static_conjunction())
     };
-    rel.type_expr
-        .as_ref()
-        .is_none_or(|_| rel.type_expr_is_static_types() && !rel.types.is_empty())
+    rel.types_are_complete_filter()
         && rel.properties.is_none()
         && static_labels(start)
         && static_labels(end)

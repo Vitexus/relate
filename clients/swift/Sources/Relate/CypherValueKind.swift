@@ -6,6 +6,31 @@ public enum CypherValueKind: UInt32, Sendable, Hashable, CaseIterable {
     case point = 10, date = 11, time = 12, localTime = 13
     case dateTime = 14, localDateTime = 15, duration = 16, vector = 17
 
+    /// The kind as error text names it (``ResultMismatch/found``). Spelled
+    /// out, not reflected, because callers match on it.
+    var name: String {
+        switch self {
+        case .null: "null"
+        case .bool: "bool"
+        case .int: "int"
+        case .float: "float"
+        case .string: "string"
+        case .node: "node"
+        case .relationship: "relationship"
+        case .path: "path"
+        case .list: "list"
+        case .map: "map"
+        case .point: "point"
+        case .date: "date"
+        case .time: "time"
+        case .localTime: "localTime"
+        case .dateTime: "dateTime"
+        case .localDateTime: "localDateTime"
+        case .duration: "duration"
+        case .vector: "vector"
+        }
+    }
+
     /// The one conversion point for `relate_value_kind`'s `Int32`
     /// return: a negative raw (a NULL handle) never reaches here, and an
     /// enumerator this client does not know (a later, additive ABI) is a

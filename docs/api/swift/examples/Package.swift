@@ -6,7 +6,8 @@ import PackageDescription
 
 let examples = [
     "quickstart", "transactions", "result-metadata", "namespaces", "persistence", "errors",
-    "bridges",
+    "bridges", "records", "statements", "async-access",
+    "observation", "provisioning", "live-values",
 ]
 
 let package = Package(

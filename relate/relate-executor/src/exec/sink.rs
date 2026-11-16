@@ -2,19 +2,20 @@
 //! of a `MATCH` evaluates per path, keeping only the projected row. Split
 //! from `project.rs` (the order family's precedent): the sink is the
 //! projection's sibling concern — it decides whether the clause can finish in
-//! the walk at all — while `project.rs` owns the ordinary `RETURN`/`WITH`
-//! (result shape, DISTINCT, paging, `project_rows`).
+//! the walk at all — while the ordinary `RETURN`/`WITH` is the merge paths and
+//! `project_rows` in `project.rs`, the plan in `classification.rs`, and the
+//! landing container, the DISTINCT pass and the tail in `post_merge.rs`.
 
 use std::collections::{BTreeMap, HashSet};
 
 use relate_core::{Result, Value};
 use relate_ir::{Clause, Projection};
 
-use crate::eval::{eval, expr_vars, is_agg_expr};
+use crate::eval::{eval, expr_within, is_agg_expr};
 use crate::overlay::ExecGraph;
 use crate::row::{Row, RowNames};
 
-use super::order::pages_eagerly;
+use super::classification::pages_eagerly;
 use super::order::{parked_values, OrderKeys};
 use super::scope::{
     is_star_item, projection_collides_with_internal_names, projection_names,
@@ -62,15 +63,14 @@ impl<'a> SinkProjection<'a> {
 /// The projection a `MATCH` may finish in its sink, when the next clause
 /// is a non-aggregate `RETURN` or `WITH`.
 pub(crate) fn sinkable_projection(clause: &Clause) -> Option<SinkProjection<'_>> {
+    let fields = ProjectionFields::from_clause(clause)?;
     let ProjectionFields {
-        distinct,
         items,
         group_by,
         order,
-        skip,
-        limit,
         where_clause,
-    } = ProjectionFields::from_clause(clause)?;
+        ..
+    } = fields;
     if group_by.is_some()
         || items
             .iter()
@@ -95,22 +95,15 @@ pub(crate) fn sinkable_projection(clause: &Clause) -> Option<SinkProjection<'_>>
     // variable the projection does not produce, the ordinary path has to
     // keep that binding (pre-projection scope).
     if let Some(predicate) = where_clause {
-        let mut named = HashSet::new();
-        expr_vars(predicate, &mut named);
         let produced: HashSet<String> = projection_names(items).into_iter().collect();
-        if named.iter().any(|name| !produced.contains(name)) {
+        if !expr_within(predicate, &produced) {
             return None;
         }
     }
-    if pages_eagerly(&ProjectionFields {
-        distinct,
-        items,
-        group_by,
-        order,
-        skip,
-        limit,
-        where_clause,
-    }) {
+    // The decline chain above has already rejected every aggregating form
+    // (an explicit `GROUP BY`, any aggregate item or subclause) and every
+    // `*` item, so only `pages_eagerly`'s paging half is left to ask.
+    if pages_eagerly(&fields) {
         return None;
     }
     Some(SinkProjection::new(items, order))
@@ -138,22 +131,19 @@ pub(crate) fn finish_match_row(
     // each item's value written over its output name. Without a key there
     // is no scope row to build — the parked values follow the items, and
     // the output schema already carries their columns.
-    let parked = if projection.order.is_empty() {
-        Vec::new()
-    } else {
+    if !projection.order.is_empty() {
         // shortcut: the scope schema depends on the incoming row's, so this
         // path still appends (and interns) per row; cache a per-sink scope
         // schema if ORDER BY lands on a hot expansion.
         let mut scope = row.clone();
-        for (index, name) in projection.item_names().iter().enumerate() {
-            scope.insert(name.clone(), values[index].clone());
+        for (name, value) in projection.item_names().iter().zip(&values) {
+            scope.insert(name.clone(), value.clone());
         }
-        parked_values(&projection.order, &scope, |expr, scope| {
+        let parked = parked_values(&projection.order, &scope, |expr, scope| {
             eval(graph, scope, expr, params)
-        })?
-    };
-    values.extend(parked);
-    debug_assert_eq!(values.len(), values.capacity());
+        })?;
+        values.extend(parked);
+    }
     Ok(Row::from_names(&projection.names, values))
 }
 

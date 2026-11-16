@@ -96,17 +96,10 @@ fn scan_warning(
     stats: &dyn PlanStats,
     seek: Option<&IndexSeek>,
 ) -> Option<PlanWarning> {
-    // The `AllNodesScan` warning's suggestion, both every-node shapes
-    // below read: the first property index the store carries, in the
-    // catalog's own listing order (no predicate pair to name in
-    // either).
-    let all_nodes_scan = || {
-        stats
-            .property_index_texts()
-            .first()
-            .cloned()
-            .map(|index| PlanWarning::AllNodesScan { index })
-    };
+    // The `AllNodesScan` gate both every-node shapes below read: whether
+    // the store carries any property index. The warning names no index.
+    let all_nodes_scan =
+        || (!stats.property_index_texts().is_empty()).then_some(PlanWarning::AllNodesScan);
     // The classic label-less scan, whatever predicates filter it — the
     // naming's derivation's own half, read here (ADR-0363).
     if super::subject::is_label_less(node) {

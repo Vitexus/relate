@@ -60,15 +60,17 @@ use crate::overlay::{ExecGraph, RetainedTotal};
 use crate::row::Row;
 
 use super::aggregate::Aggregation;
-use super::match_clause::{charge_finished_container, run_match_operator_ladder, LadderRun};
+use super::classification::ProjectionClass;
+use super::match_clause::{
+    charge_finished_container, run_match_operator_ladder, LadderRun, MatchClauseInputs,
+};
 use super::match_folds::fold_would_take;
 use super::pattern_policies::{MatchFold, RowFold};
 use super::project::{
-    maps_each_row, open_match_fold, project_rows, streams_into_projection, ProjectSpec,
-    ProjectionClass, RowSource,
+    maps_each_row, open_match_fold, project_rows, streams_into_projection, RowSource,
 };
 use super::pushdown::{live_from, match_limit_cap, trim_rows};
-use super::scope::carry_scope_bindings;
+use super::scope::{carry_scope_bindings, ProjectionFields};
 use super::sink::{sinkable_projection, SinkProjection};
 use super::RowFeed;
 
@@ -100,7 +102,7 @@ enum Transform<'a> {
     },
     /// A projection-only `WITH`.
     With {
-        spec: ProjectSpec<'a>,
+        spec: ProjectionFields<'a>,
         /// The importing subquery's scope bindings a `WITH` must keep.
         scope: Option<&'a Row>,
     },
@@ -230,26 +232,9 @@ fn stage_transform<'a>(
                 tail: &clauses[1..],
             }))
         }
-        Clause::With {
-            distinct,
-            group_by,
-            items,
-            order,
-            skip,
-            limit,
-            where_clause,
-            ..
-        } => {
-            let spec = ProjectSpec {
-                items,
-                distinct: *distinct,
-                group_by: group_by.as_deref(),
-                order,
-                skip,
-                limit,
-                where_clause: where_clause.as_ref(),
-            };
-            Ok(maps_each_row(&spec.fields()).then_some(Transform::With { spec, scope }))
+        Clause::With { .. } => {
+            let spec = ProjectionFields::of_projection(&clauses[0]);
+            Ok(maps_each_row(&spec).then_some(Transform::With { spec, scope }))
         }
         _ => Ok(None),
     }
@@ -366,11 +351,13 @@ impl<'a> Stage<'a> {
                 let LadderRun { rows, .. } = run_match_operator_ladder(
                     self.ctx,
                     batch,
-                    false,
-                    MatchMode::DifferentRelationships,
-                    patterns,
-                    *where_clause,
-                    &mut None,
+                    MatchClauseInputs {
+                        optional: false,
+                        match_mode: MatchMode::DifferentRelationships,
+                        patterns,
+                        where_clause: *where_clause,
+                    },
+                    None,
                     projection.as_ref(),
                     tail,
                     fold,

@@ -3,8 +3,16 @@ import Foundation
 /// A fully materialized statement result. Every field is copied out of the
 /// C result before it is destroyed, so a `QueryResult` is a plain value that
 /// may cross actors.
-public struct QueryResult: Sendable {
-    public let columns: [String]
+///
+/// A result is also a collection of ``Record``s (`for record in result`,
+/// `result.first`, `result.map { … }`). It is `Equatable` over every field,
+/// timings included, so two runs of one statement rarely compare equal —
+/// compare `rows` to compare what a statement returned.
+public struct QueryResult: Sendable, Equatable {
+    /// The column names with their name → position lookup, shared by every
+    /// `Record` this result vends.
+    let columnIndex: ColumnIndex
+    public var columns: [String] { columnIndex.names }
     public let rows: [[CypherValue]]
     /// The auto-commit statement's bookmark (`"relate:<n>"`, the
     /// engine's monotonic commit sequence, ADR-0502 §7): `nil` when the
@@ -32,20 +40,49 @@ public struct QueryResult: Sendable {
     /// the EXPLAIN plan render for an EXPLAIN statement.
     public let executeMs: Double
 
-    /// Rows as column-name → value dictionaries. Duplicate column names
-    /// are legal Cypher (`RETURN 1 AS a, 2 AS a`); the last column's value
-    /// is the one the name resolves to.
-    public var records: [[String: CypherValue]] {
-        rows.map { row in Dictionary(zip(columns, row), uniquingKeysWith: { _, last in last }) }
+}
+
+// MARK: - Reading rows out of a result
+
+extension QueryResult: RandomAccessCollection {
+    public var startIndex: Int { rows.startIndex }
+    public var endIndex: Int { rows.endIndex }
+
+    /// The record at a position.
+    public subscript(position: Int) -> Record {
+        Record(index: columnIndex, values: rows[position])
     }
 
-    /// The single value of a one-row, one-column result.
-    public func scalar() throws(RelateError) -> CypherValue {
-        guard rows.count == 1, columns.count == 1 else {
-            throw RelateError.decoding(
-                "scalar() needs exactly one row and one column, got \(rows.count)×\(columns.count)")
+    /// The result's rows as ``Record``s: each readable by position, by
+    /// column name, or typed. Iterating the result yields the same records.
+    /// Duplicate column names are legal Cypher (`RETURN 1 AS a, 2 AS a`);
+    /// the last column's value is the one the name resolves to.
+    ///
+    /// For a record as a plain dictionary, use ``Record/dictionary``.
+    public var records: [Record] { Array(self) }
+
+    /// The one record of a one-row result. Throws
+    /// ``RelateError/unexpectedResult(_:)`` for none or several.
+    public func single() throws(RelateError) -> Record {
+        guard rows.count == 1 else {
+            throw shapeMismatch(expected: "exactly one record", found: "\(rows.count) records")
         }
-        return rows[0][0]
+        return self[0]
+    }
+
+    /// The single value of a one-row, one-column result. Throws
+    /// ``RelateError/unexpectedResult(_:)`` for any other shape.
+    public func scalar() throws(RelateError) -> CypherValue {
+        try scalar(as: CypherValue.self)
+    }
+
+    /// The single value of a one-row, one-column result, as a Swift type.
+    public func scalar<T: CypherValueConvertible>(as type: T.Type) throws(RelateError) -> T {
+        let record = try single()
+        guard record.count == 1 else {
+            throw shapeMismatch(expected: "exactly one column", found: "\(record.count) columns")
+        }
+        return try record.get(0, as: type)
     }
 }
 
@@ -55,6 +92,17 @@ public enum QueryType: String, Sendable, Hashable {
     case write = "w"
     case readWrite = "rw"
     case schema = "s"
+}
+
+extension QueryType: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .read: "read"
+        case .write: "write"
+        case .readWrite: "read-write"
+        case .schema: "schema"
+        }
+    }
 }
 
 /// The statement's resolved namespace (ADR-0117): one of the three fixed
@@ -78,6 +126,28 @@ public struct QueryStats: Sendable, Hashable, Decodable {
     public let indexesRemoved: Int
     public let constraintsAdded: Int
     public let constraintsRemoved: Int
+}
+
+extension QueryStats {
+    static let zero = QueryStats(
+        nodesCreated: 0, nodesDeleted: 0, relationshipsCreated: 0, relationshipsDeleted: 0,
+        propertiesSet: 0, labelsAdded: 0, labelsRemoved: 0, indexesAdded: 0, indexesRemoved: 0,
+        constraintsAdded: 0, constraintsRemoved: 0)
+
+    static func + (lhs: QueryStats, rhs: QueryStats) -> QueryStats {
+        QueryStats(
+            nodesCreated: lhs.nodesCreated + rhs.nodesCreated,
+            nodesDeleted: lhs.nodesDeleted + rhs.nodesDeleted,
+            relationshipsCreated: lhs.relationshipsCreated + rhs.relationshipsCreated,
+            relationshipsDeleted: lhs.relationshipsDeleted + rhs.relationshipsDeleted,
+            propertiesSet: lhs.propertiesSet + rhs.propertiesSet,
+            labelsAdded: lhs.labelsAdded + rhs.labelsAdded,
+            labelsRemoved: lhs.labelsRemoved + rhs.labelsRemoved,
+            indexesAdded: lhs.indexesAdded + rhs.indexesAdded,
+            indexesRemoved: lhs.indexesRemoved + rhs.indexesRemoved,
+            constraintsAdded: lhs.constraintsAdded + rhs.constraintsAdded,
+            constraintsRemoved: lhs.constraintsRemoved + rhs.constraintsRemoved)
+    }
 }
 
 /// A notification's severity (ADR-0363): a closed vocabulary. A wire value

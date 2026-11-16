@@ -12,12 +12,13 @@ use crate::ctx::ExecCtx;
 use crate::row::Row;
 
 use super::aggregate::Aggregation;
+use super::classification::ProjectionClass;
 use super::match_chain::{open_match_consumer, Landing, MatchConsumer};
 use super::match_clause::{
-    charge_finished_container, run_match_operator_ladder, LadderFacts, LadderRun,
+    charge_finished_container, run_match_operator_ladder, LadderFacts, LadderRun, MatchClauseInputs,
 };
 use super::match_folds::try_match_folds;
-use super::project::{ProjectionClass, RowSource};
+use super::project::RowSource;
 use super::pushdown::{live_from, match_limit_cap, trim_rows};
 use super::search::search_match_clause;
 use super::sink::sinkable_projection;
@@ -122,7 +123,7 @@ pub(super) fn exec_match_arm<'a>(
                 // `match_limit_cap` states the WHERE policy,
                 // and `match_clause` filters in the sink ahead
                 // of the count.
-                let mut cap = if optional {
+                let cap = if optional {
                     None
                 } else {
                     match_limit_cap(
@@ -159,11 +160,13 @@ pub(super) fn exec_match_arm<'a>(
                 } = run_match_operator_ladder(
                     ctx,
                     rows,
-                    optional,
-                    match_mode,
-                    patterns,
-                    where_clause.as_ref(),
-                    &mut cap,
+                    MatchClauseInputs {
+                        optional,
+                        match_mode,
+                        patterns,
+                        where_clause: where_clause.as_ref(),
+                    },
+                    cap,
                     projection.as_ref(),
                     &clauses[i + 1..],
                     consumer.as_ref().map(MatchConsumer::as_fold),

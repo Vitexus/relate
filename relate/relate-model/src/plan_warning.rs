@@ -55,15 +55,13 @@ const ESTIMATION_MISS_FACTOR: u64 = 10;
 ///     cartesian.message(),
 ///     "the MATCH patterns share no join anchor"
 /// );
-/// // The AllNodesScan warning carries the existing property index it
-/// // suggests, so the text names it.
-/// let scan = PlanWarning::AllNodesScan {
-///     index: ":Person(name)".to_string(),
-/// };
+/// // The AllNodesScan warning names no index: a label-less pattern
+/// // cannot use one, so the advice is the label.
+/// let scan = PlanWarning::AllNodesScan;
 /// assert_eq!(scan.name(), "AllNodesScan");
 /// assert_eq!(
 ///     scan.message(),
-///     "the scan matches every node; consider the property index (:Person(name))"
+///     "the scan matches every node; add a label to narrow it"
 /// );
 /// // The label-disjunction scan carries the per-label pairs its own
 /// // predicate wants indexed (LABS-1083).
@@ -88,12 +86,10 @@ pub enum PlanWarning {
     /// multiply instead of joining.
     CartesianProduct,
     /// A label-less scan (`MATCH (n)`) while the store carries a property
-    /// index: the warning carries the existing index's text
-    /// (`:Label(property)`) as the suggestion.
-    AllNodesScan {
-        /// The existing property index the suggestion names.
-        index: String,
-    },
+    /// index. The warning names no index: no property index serves a
+    /// pattern without a label, and the one the store carries may be
+    /// unrelated to the query, so the advice is the label alone.
+    AllNodesScan,
     /// A static label disjunction no seek serves (`MATCH (p) WHERE
     /// p:Model OR p:Source` after the planner's fold, LABS-1083): the
     /// scan answers per disjunct label, never every node — its own
@@ -141,9 +137,9 @@ impl PlanWarning {
                 text: "the MATCH patterns share no join anchor".to_string(),
                 kind: NotificationKind::CartesianProduct,
             },
-            PlanWarning::AllNodesScan { .. } => VocabularyRow {
+            PlanWarning::AllNodesScan => VocabularyRow {
                 name: WARNING_ALL_NODES_SCAN,
-                text: "the scan matches every node; consider the property index".to_string(),
+                text: "the scan matches every node; add a label to narrow it".to_string(),
                 kind: NotificationKind::AllNodesScan,
             },
             PlanWarning::LabelDisjunctionScan { .. } => VocabularyRow {
@@ -162,15 +158,16 @@ impl PlanWarning {
         self.vocabulary().name
     }
 
-    /// The warning's index payload — the `AllNodesScan` warning's suggested
-    /// property index, `None` on the payload-less variants. The one spelling
+    /// The warning's index payload — the `LabelDisjunctionScan` warning's
+    /// per-label index pairs, `None` on the payload-less variants. The one spelling
     /// of which warnings carry a payload, read by both the message text
     /// and the wire form's `index` field, so the vocabulary is matched once.
     pub fn suggested_index(&self) -> Option<&str> {
         match self {
-            PlanWarning::AllNodesScan { index } => Some(index.as_str()),
             PlanWarning::LabelDisjunctionScan { indexes } => Some(indexes.as_str()),
-            PlanWarning::EstimationMiss | PlanWarning::CartesianProduct => None,
+            PlanWarning::EstimationMiss
+            | PlanWarning::CartesianProduct
+            | PlanWarning::AllNodesScan => None,
         }
     }
 
@@ -196,8 +193,8 @@ impl PlanWarning {
 
     /// The warning's message text — the vocabulary's base text
     /// ([`Self::vocabulary`]'s one spelling), with the payload appended in
-    /// parentheses when the warning carries one (the `AllNodesScan`
-    /// warning's suggested property index). The one spelling the engine
+    /// parentheses when the warning carries one (the `LabelDisjunctionScan`
+    /// warning's suggested index pairs). The one spelling the engine
     /// renderer and every surface's table layout render, so the text
     /// cannot drift between the forms.
     pub fn message(&self) -> String {
@@ -209,7 +206,7 @@ impl PlanWarning {
 
     /// The wire parse — the one validating match back into the typed
     /// vocabulary: a name from it with the payload shape its variant
-    /// carries (`AllNodesScan` requires the index, the payload-less
+    /// carries (`LabelDisjunctionScan` requires the pairs, the payload-less
     /// variants carry none). `None` names a warning outside the
     /// vocabulary or a payload shape its variant does not carry — a
     /// wire-contract break the accessor fails loudly on, never a
@@ -221,9 +218,7 @@ impl PlanWarning {
         match (name, index) {
             (WARNING_ESTIMATION_MISS, None) => Some(PlanWarning::EstimationMiss),
             (WARNING_CARTESIAN_PRODUCT, None) => Some(PlanWarning::CartesianProduct),
-            (WARNING_ALL_NODES_SCAN, Some(index)) => Some(PlanWarning::AllNodesScan {
-                index: index.to_string(),
-            }),
+            (WARNING_ALL_NODES_SCAN, None) => Some(PlanWarning::AllNodesScan),
             (WARNING_LABEL_DISJUNCTION_SCAN, Some(indexes)) => {
                 Some(PlanWarning::LabelDisjunctionScan {
                     indexes: indexes.to_string(),

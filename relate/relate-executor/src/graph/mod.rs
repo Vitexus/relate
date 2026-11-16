@@ -12,7 +12,6 @@ use crate::pull_identity::PullIdentityIndex;
 use crate::redo::{self, PullKind, RedoOp};
 use crate::store::{Interner, LiveNode, LiveRel, RelTypes};
 
-use adjacency::{adj_insert, adj_reposition};
 use constraint_keys::ConstraintKeyIndex;
 use count_state::{CountDelta, CountStats};
 
@@ -109,6 +108,10 @@ pub use query_stats::QueryStats;
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use index::take_index_rebuilds;
+// ADR-0608's durable-shape emission seam: same quarantine shape.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub use adjacency::take_sealed_builds;
 pub use relate_planner::ContainsCount;
 pub(crate) use services::StoreServices;
 
@@ -879,6 +882,18 @@ pub(crate) fn spec_has_property_defaults(spec: &crate::graph_type::GraphTypeSpec
 }
 
 impl Graph {
+    /// The one label-selection policy of the degree and count statistics families:
+    /// `None` selects every label, `Some(wanted)` exactly that one.
+    pub(crate) fn selects(wanted: Option<u32>, label: u32) -> bool {
+        wanted.is_none_or(|wanted| wanted == label)
+    }
+
+    /// The one type-selection policy of the degree and count statistics families:
+    /// `None` selects every type, `Some(wanted)` the listed ids.
+    pub(crate) fn selects_type(wanted: Option<&[u32]>, type_id: u32) -> bool {
+        wanted.is_none_or(|wanted| wanted.contains(&type_id))
+    }
+
     pub fn all_rel_ids(&self) -> Vec<RelId> {
         self.all_rel_ids_at(self.read_ts())
     }

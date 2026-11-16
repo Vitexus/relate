@@ -7,10 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `SHORTEST k` (k above 1), `SHORTEST k GROUPS` and `ANY k` between two
+  fixed endpoints now walk the trails one length class at a time instead of
+  enumerating every trail up to the hop bound, so a bounded pair query that
+  never finished on a social graph answers in milliseconds. Results are
+  unchanged; a count selector with one open end still enumerates. A start
+  with a large neighbourhood is no longer scanned neighbour by neighbour:
+  the walk reads its steps near the end from the distance ball, and a full
+  top-k heap rejects a worse trail before building it.
+
 ## [1.0.2] — 2026-11-14
 
 ### Added
 
+- Swift: managed asynchronous access. `try await db.read { tx in … }` and
+  `try await db.write { tx in … }` run a synchronous body off the caller's
+  thread on connections the database owns (one writer, up to
+  `Options.maxReaders` readers), with single-statement forms and
+  `checkpointInBackground()`. A poisoned pooled connection is replaced.
+- Swift: `Database.setTraceHandler` reports every statement with its
+  timings and parameter names, not values (its statement text holds any
+  literal spliced into it, and its error may quote a value), and every
+  statement is an `os_signpost` interval. `Database.commits()` is an
+  `AsyncStream` of
+  committed writes with their bookmark, summed counters and the tags the
+  writer attached (`db.write(tags:)`, `transaction(tags:)`).
+- Swift: live values. `Database.values(tags:_:)` is a stream of what a
+  read returns, now and again after each commit that may have changed it;
+  `@LiveQuery` is the same observation as a SwiftUI property, reading the
+  database set with `.relateDatabase(_:)`.
+- Swift: `Database.defaultStoreURL(named:)` and
+  `Database.provision(at:from:)` for seeding an app's store from its bundle,
+  and `Migrator` for idempotent schema statements plus versioned steps.
+- A guide, "Relate in an iOS app" (`docs/guides/ios-apps.md`), and the
+  `examples/ios-snotel` app moved to live queries and the asynchronous,
+  typed Swift API.
 - Swift: `Database(url:readOnly:)`, `connect(namespace:)` and
   `setNamespace(_:)` taking the typed namespace, and error predicates on
   `EngineError` (`isConstraintViolation`, `isSyntaxError`,
@@ -25,6 +58,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   18 hours, date components that are not a calendar day, a duration beyond
   `Int64` seconds, a latitude or longitude off the globe, and a vector with
   a non-finite coordinate or more than 4,096 coordinates.
+- Swift: `CypherValueConvertible`, so parameter dictionaries take Swift
+  values (strings, numbers, optionals, arrays, dates, raw-value enums)
+  without wrapping. A `QueryResult` is a collection of `Record`s with strict
+  typed accessors (`record.get("title", as: String.self)`), plus `single()`
+  and `scalar(as:)`. `QueryResult` is `Equatable`.
+- Swift: `Statement`, a value holding statement text and parameters. As a
+  string literal it binds interpolated values as parameters
+  (`try conn.run("MATCH (b {key: \(key)})")`), with `\(identifier:)` and
+  `\(raw:)` for what is not a value.
+- Swift: `CypherValueEncoder` and `CypherValueDecoder`. An `Encodable`
+  model binds as a map; rows, nodes and relationships decode into
+  `Decodable` types (`result.decode(Book.self)`).
+- Swift: `Connection.transaction(retries:_:)` re-runs its body on a
+  retryable conflict; `Connection.read(_:)` runs a consistent snapshot that
+  is always rolled back; `runInTransaction(_:retries:)` runs a list of
+  statements all-or-none; `Connection.isPoisoned()` probes for a poisoned
+  handle.
 
 ### Changed
 
@@ -63,6 +113,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NotificationSeverity` and `NotificationCategory`, with deprecated aliases.
 - Swift: calls that can only fail with the package's own error are
   `throws(RelateError)`.
+- Swift: `QueryResult.records` returns `[Record]` instead of
+  `[[String: CypherValue]]`. Reading a record by column name
+  (`record["name"]`) is unchanged; `record.dictionary` is the old form.
+- Swift: `RelateError` has two new cases, `unexpectedResult` and `misuse`;
+  an exhaustive `switch` over it needs them. `QueryResult.scalar()` now
+  throws `unexpectedResult`, rather than `decoding`, for a result that is
+  not one row and one column.
+- Swift: a `transaction(_:)` body receives a `Transaction` instead of the
+  `Connection`. A body that only runs statements on its parameter compiles
+  unchanged; one that called `begin`, `commit`, `rollback` or `setNamespace`
+  on it does not.
+
+### Deprecated
+
+- Swift: `connect(namespace:)` and `setNamespace(_:)` taking a namespace
+  name as a `String`. The namespaces are fixed; pass a
+  `DatabaseNamespace`.
 
 ## [1.0.1] — 2026-11-12
 

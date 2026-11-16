@@ -428,13 +428,11 @@ pub(crate) fn node_ok(
             }
         }
     }
-    if np.properties.is_some() {
-        let want = pattern_match_props(graph, row, np.properties.as_ref(), &np.prop_keys, params)?;
-        for (key, v) in want {
-            match view.prop(graph, id, &key) {
-                Some(have) if have.eq_non_null(&v) => {}
-                _ => return Ok(false),
-            }
+    let want = pattern_match_props(graph, row, np.properties.as_ref(), &np.prop_keys, params)?;
+    for (key, v) in want {
+        match view.prop(graph, id, &key) {
+            Some(have) if have.eq_non_null(&v) => {}
+            _ => return Ok(false),
         }
     }
     Ok(true)

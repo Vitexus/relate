@@ -6,16 +6,27 @@ struct QueryLogView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
 
+    /// What the log is searched for: the field's text without its
+    /// surrounding blanks; empty when no search is active.
+    private var searchQuery: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private var filteredEntries: [QueryLogEntry] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = searchQuery
         let entries = viewModel.queryHistory.reversed()
         guard !query.isEmpty else { return Array(entries) }
         return entries.filter { entry in
-            entry.cypher.localizedCaseInsensitiveContains(query)
-                || entry.operation.localizedCaseInsensitiveContains(query)
-                || (entry.parameters?.localizedCaseInsensitiveContains(query) ?? false)
-                || entry.failureMessage?.localizedCaseInsensitiveContains(query) == true
+            entry.searchableText.contains { $0.localizedCaseInsensitiveContains(query) }
         }
+    }
+
+    /// What the list says when it has no rows: nothing was recorded, or
+    /// nothing matches the search.
+    private var emptyState: (title: String, description: String) {
+        searchQuery.isEmpty
+            ? ("No queries recorded", "Queries appear here as the app uses Relate.")
+            : ("No matching queries", "Try a different operation or parameter.")
     }
 
     var body: some View {
@@ -30,11 +41,9 @@ struct QueryLogView: View {
                 Section("Newest first") {
                     if filteredEntries.isEmpty {
                         ContentUnavailableView(
-                            searchText.isEmpty ? "No queries recorded" : "No matching queries",
+                            emptyState.title,
                             systemImage: "text.magnifyingglass",
-                            description: Text(searchText.isEmpty
-                                ? "Queries appear here as the app uses Relate."
-                                : "Try a different operation or parameter.")
+                            description: Text(emptyState.description)
                         )
                     } else {
                         ForEach(filteredEntries) { entry in
@@ -119,11 +128,11 @@ private struct QueryLogRow: View {
                     .foregroundStyle(.green)
                     .background(Color(red: 0.055, green: 0.075, blue: 0.1), in: RoundedRectangle(cornerRadius: 10))
 
-                if let parameters = entry.parameters {
+                if !entry.parameters.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Parameters")
                             .font(.caption.bold())
-                        Text(parameters)
+                        Text(entry.parametersText)
                             .font(.system(.caption2, design: .monospaced))
                             .textSelection(.enabled)
                     }
@@ -137,9 +146,6 @@ private struct QueryLogRow: View {
 
                 HStack {
                     Label("\(entry.rowCount) rows", systemImage: "tablecells")
-                    if entry.mutationCount > 0 {
-                        Label("\(entry.mutationCount) changes", systemImage: "pencil.and.outline")
-                    }
                     Spacer()
                     Button {
                         UIPasteboard.general.string = entry.cypher
