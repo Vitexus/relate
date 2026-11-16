@@ -44,6 +44,7 @@ distributions.each { distro ->
         def buildVer
 
         node {
+          timeout(time: 90, unit: 'MINUTES') {
             ansiColor('xterm') {
                 stage("Checkout ${distro}") {
                     sh 'sudo chown -R jenkins:jenkins . 2>/dev/null || true'
@@ -71,7 +72,7 @@ distributions.each { distro ->
                             mkdir -p \$WORKSPACE/dist/debian/
                             rm -rf \$WORKSPACE/dist/debian/*
                             for deb in \$(awk '{print \$1}' debian/files); do
-                              mv "../\$deb" \$WORKSPACE/dist/debian/
+                              cp "../\$deb" \$WORKSPACE/dist/debian/ && rm -f "../\$deb"
                             done
                         """
                         artifacts = sh(
@@ -132,6 +133,7 @@ distributions.each { distro ->
                 }
 
             }
+          }
         }
     }
 }
